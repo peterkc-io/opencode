@@ -5,6 +5,8 @@ import { resetDatabase } from "../fixture/db"
 import { disposeAllInstances, TestInstance } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 import { httpApiLayer, requestInDirectory } from "./httpapi-layer"
+import path from "path"
+import fs from "fs/promises"
 
 const EventData = Schema.Struct({
   id: Schema.optional(Schema.String),
@@ -90,5 +92,30 @@ describe("event HttpApi", () => {
         expect(yield* readEvent(reader)).toMatchObject({ type: "session.created" })
       }),
     { git: true, config: { formatter: false, lsp: false } },
+  )
+
+  it.instance(
+    "delivers child events only to the exact execution-directory stream",
+    () =>
+      Effect.gen(function* () {
+        const { directory } = yield* TestInstance
+        const target = path.join(directory, "linked-target")
+        yield* Effect.promise(() => fs.mkdir(target))
+        const parent = yield* openEventStream(directory)
+        const child = yield* openEventStream(target)
+        expect(yield* readEvent(parent.reader)).toMatchObject({ type: "server.connected" })
+        expect(yield* readEvent(child.reader)).toMatchObject({ type: "server.connected" })
+
+        const created = yield* requestInDirectory("/session", target, { method: "POST" })
+        expect(created.status).toBe(200)
+        expect(yield* readEvent(child.reader)).toMatchObject({ type: "session.created" })
+        const parentStatus = yield* Queue.take(parent.reader).pipe(
+          Effect.as("event" as const),
+          Effect.timeoutOrElse({ duration: "250 millis", orElse: () => Effect.succeed("quiet" as const) }),
+        )
+        expect(parentStatus).toBe("quiet")
+      }),
+    { git: true, config: { formatter: false, lsp: false } },
+    15_000,
   )
 })

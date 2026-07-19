@@ -325,6 +325,10 @@ exports[`tool parameters JSON Schema (wire shape) task 1`] = `
       "description": "This should only be set if you mean to resume a previous task (you can pass a prior task_id and the task will continue the same subagent session as before instead of creating a fresh one)",
       "type": "string",
     },
+    "worktree": {
+      "description": "Absolute path of an existing linked Git worktree where a new task should run",
+      "type": "string",
+    },
   },
   "required": [
     "description",

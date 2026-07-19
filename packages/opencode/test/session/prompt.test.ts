@@ -57,6 +57,8 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { LocationServiceMap, locationServiceMapLayer } from "@opencode-ai/core/location-services"
+import { InstanceRef } from "@/effect/instance-ref"
+import { InstanceState } from "@/effect/instance-state"
 
 const summary = Layer.succeed(
   SessionSummary.Service,
@@ -441,6 +443,43 @@ const boot = Effect.fn("test.boot")(function* (input?: { title?: string }) {
   const chat = yield* sessions.create(input ?? { title: "Pinned" })
   return { prompt, run, sessions, chat }
 })
+
+noLLMServer.instance("rejects instance-bound session operations from the wrong root before side effects", () =>
+  Effect.gen(function* () {
+    const test = yield* TestInstance
+    const fs = yield* FSUtil.Service
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const owner = yield* InstanceState.context
+    const chat = yield* sessions.create({ title: "Pinned" })
+    const wrong = path.join(test.directory, "wrong-root")
+    const marker = path.join(wrong, "shell-ran")
+    yield* fs.makeDirectory(wrong)
+    const context = { ...owner, directory: wrong, worktree: wrong }
+
+    const operations: Effect.Effect<unknown, unknown>[] = [
+      prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        model: ref,
+        noReply: true,
+        parts: [{ type: "text", text: "do not persist" }],
+      }),
+      prompt.loop({ sessionID: chat.id }),
+      prompt.shell({ sessionID: chat.id, agent: "build", command: `touch '${marker}'` }),
+      prompt.command({ sessionID: chat.id, command: "missing", arguments: "" }),
+      prompt.cancel(chat.id),
+    ]
+
+    for (const operation of operations) {
+      const exit = yield* operation.pipe(Effect.provideService(InstanceRef, context), Effect.exit)
+      expect(Exit.isFailure(exit)).toBe(true)
+      if (Exit.isFailure(exit)) expect(Cause.squash(exit.cause)).toBeInstanceOf(Session.DirectoryMismatchError)
+    }
+    expect(yield* sessions.messages({ sessionID: chat.id })).toHaveLength(0)
+    expect(yield* fs.exists(marker)).toBe(false)
+  }),
+)
 
 // Loop semantics
 

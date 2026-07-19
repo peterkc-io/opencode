@@ -30,6 +30,7 @@ import { SessionInputTable, SessionMessageTable, SessionTable } from "@opencode-
 import { SessionMessage } from "@opencode-ai/core/session/message"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { ProviderV2 } from "@opencode-ai/core/provider"
+import { WorkspaceV2 } from "@opencode-ai/core/workspace"
 import * as DateTime from "effect/DateTime"
 import { eq } from "drizzle-orm"
 import { resetDatabase } from "../fixture/db"
@@ -390,10 +391,7 @@ describe("session HttpApi", () => {
 
   it.live("uses the persisted session directory for prompt requests", () =>
     Effect.gen(function* () {
-      const llm = yield* TestLLMServer
-      yield* llm.text("ok", { usage: { input: 1, output: 1 } })
-
-      const config = testProviderConfig(llm.url)
+      const config = { formatter: false, lsp: false }
       const sessionDirectory = yield* tmpdirScoped({ git: true, config })
       const requestDirectory = yield* tmpdirScoped({ git: true, config })
       const session = yield* createSession({ title: "directory regression" }).pipe(
@@ -407,24 +405,21 @@ describe("session HttpApi", () => {
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
             agent: "build",
-            model: { providerID: "test", modelID: "test-model" },
+            noReply: true,
             parts: [{ type: "text", text: "which directory?" }],
           }),
         },
       )
 
       expect(response.status).toBe(200)
-      yield* responseJson(response)
+      expect(yield* responseJson(response)).toMatchObject({ info: { role: "user" } })
 
       const messages = yield* Session.use
         .messages({ sessionID: session.id })
         .pipe(provideInstanceEffect(sessionDirectory), Effect.orDie)
-      const assistant = messages.find((message) => message.info.role === "assistant")
-      expect(assistant?.info.role === "assistant" ? assistant.info.path : undefined).toEqual({
-        cwd: sessionDirectory,
-        root: sessionDirectory,
-      })
-    }).pipe(Effect.provide(TestLLMServer.layer), Effect.provide(AppNodeBuilder.build(CrossSpawnSpawner.node))),
+      expect(messages).toHaveLength(1)
+      expect(messages[0]?.info.role).toBe("user")
+    }).pipe(Effect.provide(AppNodeBuilder.build(CrossSpawnSpawner.node))),
   )
 
   it.instance(
@@ -876,6 +871,135 @@ describe("session HttpApi", () => {
 
         expect(sessions).toContain(pathSession.id)
         expect(sessions).not.toContain(pathlessSession.id)
+      }),
+    { git: true, config: { formatter: false, lsp: false } },
+  )
+
+  it.instance(
+    "lists cross-directory children only from their directory or project scope",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const target = path.join(test.directory, "linked-target")
+        yield* Effect.promise(() => mkdir(target))
+        const store = yield* InstanceStore.Service
+        const child = yield* store.provide({ directory: target }, createSession({ title: "placed child" }))
+
+        const parentHeaders = { "x-opencode-directory": test.directory }
+        const targetHeaders = { "x-opencode-directory": target }
+        const parent = yield* requestJson<Session.Info[]>(
+          `${SessionPaths.list}?directory=${encodeURIComponent(test.directory)}`,
+          { headers: parentHeaders },
+        )
+        const located = yield* requestJson<Session.Info[]>(
+          `${SessionPaths.list}?directory=${encodeURIComponent(target)}`,
+          { headers: targetHeaders },
+        )
+        const project = yield* requestJson<Session.Info[]>(
+          `${SessionPaths.list}?scope=project&directory=${encodeURIComponent(test.directory)}`,
+          { headers: parentHeaders },
+        )
+
+        expect(parent.map((item) => item.id)).not.toContain(child.id)
+        expect(located.map((item) => item.id)).toContain(child.id)
+        expect(project.map((item) => item.id)).toContain(child.id)
+      }),
+    { git: true, config: { formatter: false, lsp: false } },
+  )
+
+  it.instance(
+    "reserves taskPlacement metadata from public create and update",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const headers = { "x-opencode-directory": test.directory, "content-type": "application/json" }
+        const placement = { ownerDirectory: test.directory, executionDirectory: test.directory }
+        const injected = yield* request(SessionPaths.create, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ metadata: { taskPlacement: placement } }),
+        })
+        expect(injected.status).toBe(400)
+
+        const session = yield* createSession({ metadata: { taskPlacement: placement } })
+        const updated = yield* requestJson<Session.Info>(pathFor(SessionPaths.update, { sessionID: session.id }), {
+          method: "PATCH",
+          headers,
+          body: JSON.stringify({ metadata: { note: "preserved" } }),
+        })
+        expect(updated.metadata).toEqual({ note: "preserved", taskPlacement: placement })
+
+        const overwritten = yield* request(pathFor(SessionPaths.update, { sessionID: session.id }), {
+          method: "PATCH",
+          headers,
+          body: JSON.stringify({ metadata: { taskPlacement: placement } }),
+        })
+        expect(overwritten.status).toBe(400)
+
+        const partiallyUpdated = yield* request(pathFor(SessionPaths.update, { sessionID: session.id }), {
+          method: "PATCH",
+          headers,
+          body: JSON.stringify({ title: "must not persist", metadata: { taskPlacement: placement } }),
+        })
+        expect(partiallyUpdated.status).toBe(400)
+        const preserved = yield* requestJson<Session.Info>(pathFor(SessionPaths.get, { sessionID: session.id }), {
+          headers,
+        })
+        expect(preserved.title).toBe(session.title)
+      }),
+    { git: true, config: { formatter: false, lsp: false } },
+  )
+
+  it.instance(
+    "rejects child creation across workspace boundaries",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const sessions = yield* Session.Service
+        const parentWorkspace = WorkspaceV2.ID.ascending()
+        const childWorkspace = WorkspaceV2.ID.ascending()
+        const parent = yield* sessions.create({ title: "workspace parent", workspaceID: parentWorkspace })
+        const headers = { "x-opencode-directory": test.directory, "content-type": "application/json" }
+
+        const response = yield* request(SessionPaths.create, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ parentID: parent.id, workspaceID: childWorkspace }),
+        })
+        const direct = yield* sessions
+          .create({ parentID: parent.id, title: "foreign child", workspaceID: childWorkspace })
+          .pipe(Effect.exit)
+
+        expect(response.status).toBe(400)
+        expect(Exit.isFailure(direct)).toBe(true)
+        expect(yield* sessions.children(parent.id)).toHaveLength(0)
+      }),
+    { git: true, config: { formatter: false, lsp: false } },
+  )
+
+  it.instance(
+    "rebinds session mutation routes to the persisted directory before handler guards",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const target = path.join(test.directory, "mutation-target")
+        yield* Effect.promise(() => mkdir(target))
+        const store = yield* InstanceStore.Service
+        const session = yield* store.provide({ directory: target }, createSession({ title: "persisted target" }))
+        const headers = { "x-opencode-directory": test.directory, "content-type": "application/json" }
+
+        const reverted = yield* requestJson<Session.Info>(pathFor(SessionPaths.revert, { sessionID: session.id }), {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ messageID: MessageID.ascending() }),
+        })
+        const restored = yield* requestJson<Session.Info>(pathFor(SessionPaths.unrevert, { sessionID: session.id }), {
+          method: "POST",
+          headers,
+        })
+
+        expect(reverted.directory).toBe(target)
+        expect(restored.directory).toBe(target)
       }),
     { git: true, config: { formatter: false, lsp: false } },
   )

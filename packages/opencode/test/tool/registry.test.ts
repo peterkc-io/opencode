@@ -57,6 +57,19 @@ const replacements = [
 ] as const
 
 const it = testEffect(LayerNode.compile(root, replacements))
+const withTaskFlags = (flags: Partial<RuntimeFlags.Info>) =>
+  testEffect(
+    LayerNode.compile(root, [
+      [Config.node, configLayer],
+      [RuntimeFlags.node, RuntimeFlags.layer(flags)],
+    ]),
+  )
+const backgroundTask = withTaskFlags({ experimentalBackgroundSubagents: true })
+const worktreeTask = withTaskFlags({ experimentalSubagentWorktrees: true })
+const backgroundWorktreeTask = withTaskFlags({
+  experimentalBackgroundSubagents: true,
+  experimentalSubagentWorktrees: true,
+})
 const withCodeMode = testEffect(
   LayerNode.compile(root, [
     [Config.node, configLayer],
@@ -164,6 +177,53 @@ describe("tool.registry", () => {
 
       expect(task?.jsonSchema).toBeDefined()
       expect((task?.jsonSchema?.properties as Record<string, unknown> | undefined)?.background).toBeUndefined()
+      expect((task?.jsonSchema?.properties as Record<string, unknown> | undefined)?.worktree).toBeUndefined()
+    }),
+  )
+
+  backgroundTask.instance("exposes only the enabled task background parameter", () =>
+    Effect.gen(function* () {
+      const registry = yield* ToolRegistry.Service
+      const agent = yield* Agent.Service
+      const task = (yield* registry.tools({
+        providerID: ProviderV2.ID.opencode,
+        modelID: ModelV2.ID.make("test"),
+        agent: yield* agent.defaultInfo(),
+      })).find((tool) => tool.id === "task")
+      const properties = task?.jsonSchema?.properties as Record<string, unknown> | undefined
+
+      expect(properties?.background).toBeDefined()
+      expect(properties?.worktree).toBeUndefined()
+    }),
+  )
+
+  worktreeTask.instance("exposes only the enabled task worktree parameter", () =>
+    Effect.gen(function* () {
+      const registry = yield* ToolRegistry.Service
+      const agent = yield* Agent.Service
+      const task = (yield* registry.tools({
+        providerID: ProviderV2.ID.opencode,
+        modelID: ModelV2.ID.make("test"),
+        agent: yield* agent.defaultInfo(),
+      })).find((tool) => tool.id === "task")
+      const properties = task?.jsonSchema?.properties as Record<string, unknown> | undefined
+
+      expect(properties?.background).toBeUndefined()
+      expect(properties?.worktree).toBeDefined()
+    }),
+  )
+
+  backgroundWorktreeTask.instance("uses the full task schema when both optional parameters are enabled", () =>
+    Effect.gen(function* () {
+      const registry = yield* ToolRegistry.Service
+      const agent = yield* Agent.Service
+      const task = (yield* registry.tools({
+        providerID: ProviderV2.ID.opencode,
+        modelID: ModelV2.ID.make("test"),
+        agent: yield* agent.defaultInfo(),
+      })).find((tool) => tool.id === "task")
+
+      expect(task?.jsonSchema).toBeUndefined()
     }),
   )
 

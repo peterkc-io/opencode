@@ -44,6 +44,8 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { SessionMessage } from "@opencode-ai/schema/session-message"
+import { FSUtil } from "@opencode-ai/core/fs-util"
+import { InstanceRef } from "@/effect/instance-ref"
 
 const parentTitlePrefix = "New session - "
 const childTitlePrefix = "Child session - "
@@ -220,6 +222,51 @@ const Model = Schema.Struct({
 })
 
 export const Metadata = Schema.Record(Schema.String, Schema.Any)
+
+export const TaskPlacement = Schema.Struct({
+  ownerDirectory: Schema.String,
+  executionDirectory: Schema.String,
+})
+export type TaskPlacement = Schema.Schema.Type<typeof TaskPlacement>
+
+export class InvalidTaskPlacementError extends Schema.TaggedErrorClass<InvalidTaskPlacementError>()(
+  "SessionInvalidTaskPlacementError",
+  {
+    sessionID: SessionID,
+    message: Schema.String,
+  },
+) {}
+
+export class DirectoryMismatchError extends Schema.TaggedErrorClass<DirectoryMismatchError>()(
+  "SessionDirectoryMismatchError",
+  {
+    sessionID: SessionID,
+    sessionDirectory: Schema.String,
+    instanceDirectory: Schema.String,
+    message: Schema.String,
+  },
+) {}
+
+export const taskPlacement = Effect.fnUntraced(function* (session: Pick<Info, "id" | "metadata">) {
+  const value = session.metadata?.taskPlacement
+  if (value === undefined) return undefined
+  const placement = yield* Schema.decodeUnknownEffect(TaskPlacement)(value).pipe(
+    Effect.mapError(
+      () =>
+        new InvalidTaskPlacementError({
+          sessionID: session.id,
+          message: `Session has invalid taskPlacement metadata: ${session.id}`,
+        }),
+    ),
+  )
+  if (!path.isAbsolute(placement.ownerDirectory) || !path.isAbsolute(placement.executionDirectory)) {
+    return yield* new InvalidTaskPlacementError({
+      sessionID: session.id,
+      message: `Session taskPlacement directories must be absolute: ${session.id}`,
+    })
+  }
+  return placement
+})
 
 export const Info = Schema.Struct({
   id: SessionID,
@@ -410,6 +457,10 @@ export class BusyError extends Schema.TaggedErrorClass<BusyError>()("SessionBusy
   sessionID: SessionID,
 }) {}
 
+export class ParentMismatchError extends Schema.TaggedErrorClass<ParentMismatchError>()("SessionParentMismatchError", {
+  parentID: SessionID,
+}) {}
+
 export type NotFound = NotFoundError
 
 export interface Interface {
@@ -427,6 +478,7 @@ export interface Interface {
   readonly fork: (input: { sessionID: SessionID; messageID?: MessageID }) => Effect.Effect<Info, NotFound>
   readonly touch: (sessionID: SessionID) => Effect.Effect<void>
   readonly get: (id: SessionID) => Effect.Effect<Info, NotFound>
+  readonly assertInstanceDirectory: (id: SessionID) => Effect.Effect<Info, NotFound | DirectoryMismatchError>
   readonly setTitle: (input: { sessionID: SessionID; title: string }) => Effect.Effect<void>
   readonly setArchived: (input: { sessionID: SessionID; time?: number }) => Effect.Effect<void>
   readonly setMetadata: (input: typeof SetMetadataInput.Type) => Effect.Effect<void>
@@ -488,7 +540,7 @@ export type Patch = Omit<Partial<Info>, "time" | "share" | "summary" | "revert" 
 const layer: Layer.Layer<
   Service,
   never,
-  BackgroundJob.Service | RuntimeFlags.Service | Database.Service | EventV2Bridge.Service
+  BackgroundJob.Service | RuntimeFlags.Service | Database.Service | EventV2Bridge.Service | FSUtil.Service
 > = Layer.effect(
   Service,
   Effect.gen(function* () {
@@ -497,6 +549,7 @@ const layer: Layer.Layer<
     const background = yield* BackgroundJob.Service
     const events = yield* EventV2Bridge.Service
     const flags = yield* RuntimeFlags.Service
+    const fs = yield* FSUtil.Service
 
     const createNext = Effect.fn("Session.createNext")(function* (input: {
       id?: SessionID
@@ -534,7 +587,32 @@ const layer: Layer.Layer<
       }
       yield* Effect.logInfo("created", result)
 
-      yield* events.publish(SessionV1.Event.Created, { sessionID: result.id, info: result })
+      const parentID = input.parentID
+      const options = parentID
+        ? {
+            commit: () =>
+              db
+                .select({ id: SessionTable.id })
+                .from(SessionTable)
+                .where(
+                  and(
+                    eq(SessionTable.id, parentID),
+                    eq(SessionTable.project_id, result.projectID),
+                    result.workspaceID
+                      ? eq(SessionTable.workspace_id, result.workspaceID)
+                      : isNull(SessionTable.workspace_id),
+                  ),
+                )
+                .get()
+                .pipe(
+                  Effect.orDie,
+                  Effect.flatMap((parent) =>
+                    parent ? Effect.void : Effect.die(new ParentMismatchError({ parentID })),
+                  ),
+                ),
+          }
+        : undefined
+      yield* events.publish(SessionV1.Event.Created, { sessionID: result.id, info: result }, options)
 
       return result
     })
@@ -543,6 +621,48 @@ const layer: Layer.Layer<
       const row = yield* db.select().from(SessionTable).where(eq(SessionTable.id, id)).get().pipe(Effect.orDie)
       if (!row) return yield* Effect.fail(new NotFoundError({ message: `Session not found: ${id}` }))
       return fromRow(row)
+    })
+
+    const canonicalDirectory = Effect.fnUntraced(function* (sessionID: SessionID, input: string, kind: string) {
+      return yield* fs.realPath(path.resolve(input)).pipe(
+        Effect.map((value) => {
+          const normalized = path.normalize(value)
+          return process.platform === "win32" ? normalized.toLowerCase() : normalized
+        }),
+        Effect.mapError(
+          () =>
+            new DirectoryMismatchError({
+              sessionID,
+              sessionDirectory: input,
+              instanceDirectory: input,
+              message: `${kind} directory no longer resolves: ${input}`,
+            }),
+        ),
+      )
+    })
+
+    const assertInstanceDirectory = Effect.fn("Session.assertInstanceDirectory")(function* (sessionID: SessionID) {
+      const session = yield* get(sessionID)
+      const ctx = yield* InstanceState.context
+      if (session.projectID !== ctx.project.id) {
+        return yield* new DirectoryMismatchError({
+          sessionID,
+          sessionDirectory: session.directory,
+          instanceDirectory: ctx.directory,
+          message: `Session project does not match the active instance: ${sessionID}`,
+        })
+      }
+      const expected = yield* canonicalDirectory(sessionID, session.directory, "Session")
+      const active = yield* canonicalDirectory(sessionID, ctx.directory, "Active instance")
+      if (expected !== active) {
+        return yield* new DirectoryMismatchError({
+          sessionID,
+          sessionDirectory: expected,
+          instanceDirectory: active,
+          message: `Session belongs to ${expected}, not the active instance ${active}`,
+        })
+      }
+      return session
     })
 
     const list = Effect.fn("Session.list")(function* (input?: ListInput) {
@@ -607,25 +727,49 @@ const layer: Layer.Layer<
 
     const remove: Interface["remove"] = Effect.fnUntraced(function* (sessionID: SessionID) {
       const session = yield* get(sessionID)
-      try {
-        // `remove` needs to work in all cases, such as broken sessions that
-        // run cleanup without instance state.
-        const hasInstance = yield* InstanceState.directory.pipe(
-          Effect.as(true),
-          Effect.catchCause(() => Effect.succeed(false)),
-        )
-
-        if (hasInstance) yield* cancelBackgroundJobs(background, sessionID)
-        const kids = yield* children(sessionID)
-        for (const child of kids) {
-          yield* remove(child.id)
+      const placement = yield* taskPlacement(session).pipe(Effect.orDie)
+      const instance = yield* InstanceRef
+      const cancelBackground = Effect.gen(function* () {
+        yield* background.cancelSessionAt({ directory: placement?.ownerDirectory ?? session.directory, sessionID })
+        if (placement && placement.executionDirectory !== placement.ownerDirectory) {
+          yield* background.cancelSessionAt({ directory: placement.executionDirectory, sessionID })
         }
+      })
 
-        yield* events.publish(SessionV1.Event.Deleted, { sessionID, info: session })
-        yield* events.remove(sessionID)
-      } catch (error) {
-        yield* Effect.logError("failed to remove session", { sessionID, error })
-      }
+      yield* cancelBackground
+
+      const kids = yield* children(sessionID)
+      for (const child of kids) yield* remove(child.id)
+
+      yield* Effect.uninterruptible(
+        Effect.gen(function* () {
+          const cleanup = Effect.gen(function* () {
+            yield* events.publish(SessionV1.Event.Deleted, { sessionID, info: session })
+            yield* events.remove(sessionID)
+          })
+          const executionDirectory = placement?.executionDirectory ?? session.directory
+          if (
+            !instance ||
+            instance.project.id !== session.projectID ||
+            FSUtil.resolve(instance.directory) === FSUtil.resolve(executionDirectory)
+          ) {
+            yield* cleanup
+          } else {
+            yield* cleanup.pipe(
+              Effect.provideService(InstanceRef, {
+                directory: executionDirectory,
+                worktree: executionDirectory,
+                project: instance.project,
+              }),
+            )
+          }
+
+          // The parent row is now gone, so new child commits fail. Remove any
+          // child that committed after the first enumeration but before deletion.
+          const lateKids = yield* children(sessionID)
+          for (const child of lateKids) yield* remove(child.id)
+        }).pipe(Effect.ensuring(cancelBackground)),
+      )
     })
 
     const updateMessage = <T extends SessionV1.Info>(msg: T): Effect.Effect<T> =>
@@ -694,12 +838,14 @@ const layer: Layer.Layer<
       const ctx = yield* InstanceState.context
       const original = yield* get(input.sessionID)
       const title = getForkedTitle(original.title)
+      const metadata = structuredClone(original.metadata)
+      if (metadata) delete metadata.taskPlacement
       const session = yield* createNext({
         directory: ctx.directory,
         path: sessionPath(ctx.worktree, ctx.directory),
         workspaceID: original.workspaceID,
         title,
-        metadata: structuredClone(original.metadata),
+        metadata,
       })
       const msgs = yield* messages({ sessionID: input.sessionID })
       const idMap = new Map<string, MessageID>()
@@ -761,7 +907,11 @@ const layer: Layer.Layer<
     })
 
     const setMetadata = Effect.fn("Session.setMetadata")(function* (input: typeof SetMetadataInput.Type) {
-      yield* patch(input.sessionID, { metadata: input.metadata, time: { updated: Date.now() } }).pipe(Effect.orDie)
+      const current = yield* get(input.sessionID).pipe(Effect.orDie)
+      const metadata = { ...input.metadata }
+      if (current.metadata?.taskPlacement !== undefined) metadata.taskPlacement = current.metadata.taskPlacement
+      else delete metadata.taskPlacement
+      yield* patch(input.sessionID, { metadata, time: { updated: Date.now() } }).pipe(Effect.orDie)
     })
 
     const setAgentModel = Effect.fn("Session.setAgentModel")(function* (input: {
@@ -912,6 +1062,7 @@ const layer: Layer.Layer<
       fork,
       touch,
       get,
+      assertInstanceDirectory,
       setTitle,
       setArchived,
       setMetadata,
@@ -936,23 +1087,6 @@ const layer: Layer.Layer<
     })
   }),
 )
-
-const cancelBackgroundJobs = Effect.fn("Session.cancelBackgroundJobs")(function* (
-  background: BackgroundJob.Interface,
-  sessionID: SessionID,
-) {
-  const jobs = yield* background.list()
-  yield* Effect.forEach(
-    jobs.filter((job) => {
-      if (job.status !== "running") return false
-      if (job.id === sessionID) return true
-      if (job.metadata?.sessionId === sessionID) return true
-      return job.metadata?.parentSessionId === sessionID
-    }),
-    (job) => background.cancel(job.id),
-    { concurrency: "unbounded", discard: true },
-  )
-})
 
 function listByProject(
   db: Database.Interface["db"],
@@ -1012,7 +1146,7 @@ function listByProject(
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [BackgroundJob.node, RuntimeFlags.node, Database.node, EventV2Bridge.node],
+  deps: [BackgroundJob.node, RuntimeFlags.node, Database.node, EventV2Bridge.node, FSUtil.node],
 })
 
 export * as Session from "./session"

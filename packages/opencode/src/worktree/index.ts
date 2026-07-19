@@ -17,6 +17,7 @@ import { FSUtil } from "@opencode-ai/core/fs-util"
 import { AppProcess } from "@opencode-ai/core/process"
 import { InstanceState } from "@/effect/instance-state"
 import { WorktreeEvent } from "@opencode-ai/schema/worktree-event"
+import type { InstanceContext } from "@/project/instance-context"
 
 export const Event = WorktreeEvent
 
@@ -79,6 +80,10 @@ export class ListFailedError extends Schema.TaggedErrorClass<ListFailedError>()(
   message: Schema.String,
 }) {}
 
+export class InvalidTargetError extends Schema.TaggedErrorClass<InvalidTargetError>()("WorktreeInvalidTargetError", {
+  message: Schema.String,
+}) {}
+
 export type Error =
   | NotGitError
   | NameGenerationFailedError
@@ -121,6 +126,10 @@ export interface Interface {
   readonly createFromInfo: (info: Info, startCommand?: string) => Effect.Effect<void, Error>
   readonly create: (input?: CreateInput) => Effect.Effect<Info, Error>
   readonly list: () => Effect.Effect<(Omit<Info, "branch"> & { branch?: string })[], Error>
+  readonly resolveLinked: (
+    directory: string,
+  ) => Effect.Effect<{ directory: string; branch?: string }, InvalidTargetError>
+  readonly loadLinked: (directory: string) => Effect.Effect<InstanceContext, InvalidTargetError>
   readonly remove: (input: RemoveInput) => Effect.Effect<boolean, Error>
   readonly reset: (input: ResetInput) => Effect.Effect<boolean, Error>
 }
@@ -128,6 +137,73 @@ export interface Interface {
 export class Service extends Context.Service<Service, Interface>()("@opencode/Worktree") {}
 
 type GitResult = { code: number; text: string; stderr: string }
+
+type PorcelainEntry = {
+  worktree: string
+  HEAD?: string
+  branch?: string
+  bare?: true
+  detached?: true
+  locked?: string
+  prunable?: string
+}
+
+export function parseWorktreePorcelain(text: string) {
+  const entries: PorcelainEntry[] = []
+  let current: Partial<PorcelainEntry> | undefined
+  const seen = new Set<string>()
+
+  for (const field of text.split("\0")) {
+    if (!field) {
+      if (!current) continue
+      if (!current.worktree) throw new Error("worktree entry is missing its path")
+      entries.push(current as PorcelainEntry)
+      current = undefined
+      seen.clear()
+      continue
+    }
+    if (field.includes("\n") || field.includes("\r")) throw new Error("worktree entry contains an invalid delimiter")
+
+    const separator = field.indexOf(" ")
+    const key = separator === -1 ? field : field.slice(0, separator)
+    const value = separator === -1 ? "" : field.slice(separator + 1)
+    if (key === "worktree") {
+      if (current) throw new Error("worktree entries are not NUL separated")
+      if (!value) throw new Error("worktree entry has an empty path")
+      current = { worktree: value }
+      seen.clear()
+      seen.add(key)
+      continue
+    }
+    if (!current) throw new Error(`worktree field appears before its path: ${key}`)
+    if (seen.has(key)) throw new Error(`worktree entry repeats field: ${key}`)
+    seen.add(key)
+
+    if (key === "HEAD") {
+      if (!value) throw new Error("worktree entry has an empty HEAD")
+      current.HEAD = value
+      continue
+    }
+    if (key === "branch") {
+      if (!value) throw new Error("worktree entry has an empty branch")
+      current.branch = value
+      continue
+    }
+    if (key === "bare" || key === "detached") {
+      if (value) throw new Error(`worktree flag has an unexpected value: ${key}`)
+      current[key] = true
+      continue
+    }
+    if (key === "locked" || key === "prunable") {
+      current[key] = value
+      continue
+    }
+    throw new Error(`worktree entry has an unknown field: ${key}`)
+  }
+
+  if (current) throw new Error("worktree output is missing its final separator")
+  return entries
+}
 
 const layer: Layer.Layer<
   Service,
@@ -299,6 +375,22 @@ const layer: Layer.Layer<
       return process.platform === "win32" ? normalized.toLowerCase() : normalized
     })
 
+    const canonicalStrict = Effect.fnUntraced(function* (input: string) {
+      const real = yield* fs.realPath(pathSvc.resolve(input)).pipe(
+        Effect.mapError(
+          () =>
+            new InvalidTargetError({
+              message: `Worktree target does not resolve to an existing directory: ${input}`,
+            }),
+        ),
+      )
+      if (!(yield* fs.isDir(real))) {
+        return yield* new InvalidTargetError({ message: `Worktree target is not a directory: ${input}` })
+      }
+      const normalized = pathSvc.normalize(real)
+      return process.platform === "win32" ? normalized.toLowerCase() : normalized
+    })
+
     function parseWorktreeList(text: string) {
       return text
         .split("\n")
@@ -356,6 +448,94 @@ const layer: Layer.Layer<
           }
         }),
       ).pipe(Effect.map((items) => items.filter((item) => item !== undefined)))
+    })
+
+    const resolveLinked = Effect.fn("Worktree.resolveLinked")(function* (input: string) {
+      const ctx = yield* InstanceState.context
+      if (ctx.project.vcs !== "git") {
+        return yield* new InvalidTargetError({ message: "Explicit task placement requires a Git project" })
+      }
+      if (!pathSvc.isAbsolute(input)) {
+        return yield* new InvalidTargetError({ message: `Worktree target must be an absolute path: ${input}` })
+      }
+
+      const directory = yield* canonicalStrict(input)
+      const result = yield* git(["worktree", "list", "--porcelain", "-z"], { cwd: ctx.worktree })
+      if (result.code !== 0) {
+        return yield* new InvalidTargetError({
+          message: result.stderr || result.text || "Failed to read linked Git worktrees",
+        })
+      }
+
+      const entries = yield* Effect.try({
+        try: () => parseWorktreePorcelain(result.text),
+        catch: (error) =>
+          new InvalidTargetError({
+            message: `Malformed Git worktree list: ${error instanceof Error ? error.message : String(error)}`,
+          }),
+      })
+      if (entries.length === 0) {
+        return yield* new InvalidTargetError({ message: "Git reported no worktrees for the current project" })
+      }
+      if (entries.some((entry) => entry.bare)) {
+        return yield* new InvalidTargetError({ message: "Bare-repository worktree placement is not supported" })
+      }
+
+      const raw = new Set<string>()
+      for (const entry of entries) {
+        const key = pathSvc.normalize(pathSvc.resolve(entry.worktree))
+        const normalized = process.platform === "win32" ? key.toLowerCase() : key
+        if (raw.has(normalized)) {
+          return yield* new InvalidTargetError({ message: `Git reported a duplicate worktree path: ${entry.worktree}` })
+        }
+        raw.add(normalized)
+      }
+
+      const primary = yield* canonicalStrict(ctx.project.worktree)
+      if (directory === primary) {
+        return yield* new InvalidTargetError({ message: "The primary checkout cannot be an explicit task target" })
+      }
+
+      const matches = [] as PorcelainEntry[]
+      for (const entry of entries) {
+        const lexical = pathSvc.normalize(pathSvc.resolve(entry.worktree))
+        const normalized = process.platform === "win32" ? lexical.toLowerCase() : lexical
+        if (entry.prunable !== undefined) {
+          if (normalized === directory) {
+            return yield* new InvalidTargetError({ message: `Worktree target is prunable: ${directory}` })
+          }
+          continue
+        }
+        const linked = yield* canonicalStrict(entry.worktree)
+        if (linked === directory) matches.push(entry)
+      }
+
+      if (matches.length !== 1) {
+        return yield* new InvalidTargetError({
+          message:
+            matches.length === 0
+              ? `Target is not an active linked worktree for this project: ${directory}`
+              : `Target matches multiple linked worktrees: ${directory}`,
+        })
+      }
+      const entry = matches[0]
+      if (!entry.HEAD) {
+        return yield* new InvalidTargetError({ message: `Linked worktree is missing HEAD metadata: ${directory}` })
+      }
+      if (!entry.branch && !entry.detached) {
+        return yield* new InvalidTargetError({
+          message: `Linked worktree has no branch or detached marker: ${directory}`,
+        })
+      }
+      return {
+        directory,
+        ...(entry.branch ? { branch: entry.branch.replace(/^refs\/heads\//, "") } : {}),
+      }
+    })
+
+    const loadLinked = Effect.fn("Worktree.loadLinked")(function* (input: string) {
+      const linked = yield* resolveLinked(input)
+      return yield* store.load({ directory: linked.directory })
     })
 
     function stopFsmonitor(target: string) {
@@ -610,7 +790,7 @@ const layer: Layer.Layer<
       return true
     })
 
-    return Service.of({ makeWorktreeInfo, createFromInfo, create, list, remove, reset })
+    return Service.of({ makeWorktreeInfo, createFromInfo, create, list, resolveLinked, loadLinked, remove, reset })
   }),
 )
 

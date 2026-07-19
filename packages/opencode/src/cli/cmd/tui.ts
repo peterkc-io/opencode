@@ -14,6 +14,7 @@ import { writeHeapSnapshot } from "v8"
 import { ServerAuth } from "@/server/auth"
 import { validateSession } from "../tui/validate-session"
 import { win32InstallCtrlCGuard } from "@opencode-ai/tui/terminal-win32"
+import { COMPONENT_ENV, INSTANCE_ID_ENV, instanceID } from "@opencode-ai/core/observability/shared"
 
 declare global {
   const OPENCODE_WORKER_PATH: string
@@ -206,11 +207,16 @@ export const TuiThreadCommand = cmd({
         return
       }
       const cwd = Filesystem.resolve(process.cwd())
+      process.env[COMPONENT_ENV] = "tui"
 
       const worker = new Worker(file, {
-        env: Object.fromEntries(
-          Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
-        ),
+        env: {
+          ...Object.fromEntries(
+            Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
+          ),
+          [INSTANCE_ID_ENV]: instanceID,
+          [COMPONENT_ENV]: "server-worker",
+        },
       })
       const client = Rpc.client<typeof rpc>(worker)
       const reload = () => {

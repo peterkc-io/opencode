@@ -6,6 +6,7 @@ import os from "os"
 import path from "path"
 import { fileLogger } from "../../src/observability/logging"
 import { resource } from "../../src/observability/otlp"
+import { resolveInstanceID } from "../../src/observability/shared"
 
 const otelResourceAttributes = process.env.OTEL_RESOURCE_ATTRIBUTES
 const opencodeClient = process.env.OPENCODE_CLIENT
@@ -41,15 +42,23 @@ describe("resource", () => {
   test("keeps built-in attributes when env values conflict", () => {
     process.env.OPENCODE_CLIENT = "cli"
     process.env.OTEL_RESOURCE_ATTRIBUTES =
-      "opencode.client=web,service.instance.id=override,service.namespace=anomalyco"
+      "opencode.client=web,service.instance.id=override,service.name=claude-code-cli,service.namespace=anomalyco,service.version=local"
 
     expect(resource().attributes).toMatchObject({
       "opencode.client": "cli",
+      "service.name": "opencode",
       "service.namespace": "anomalyco",
+      "service.version": resource().serviceVersion,
     })
     expect(resource().attributes["service.instance.id"]).not.toBe("override")
     expect(resource().attributes["opencode.run"]).toMatch(/^[0-9a-f]{8}$/)
   })
+})
+
+test("accepts safe instance IDs and replaces path-capable values", () => {
+  expect(resolveInstanceID("launch-123", () => "generated")).toBe("launch-123")
+  expect(resolveInstanceID("../outside", () => "generated")).toBe("generated")
+  expect(resolveInstanceID("a".repeat(129), () => "generated")).toBe("generated")
 })
 
 test("file logger appends concurrent runs with a run on every line", async () => {

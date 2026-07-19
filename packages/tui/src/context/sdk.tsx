@@ -3,6 +3,8 @@ import type { GlobalEvent } from "@opencode-ai/sdk/v2"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { createSimpleContext } from "./helper"
 import { batch, onCleanup, onMount } from "solid-js"
+import { useDiagnostics } from "./diagnostics"
+import { errorDetails, sessionID } from "../diagnostics/event"
 
 export type EventSource = {
   subscribe: (handler: (event: GlobalEvent) => void) => Promise<() => void>
@@ -18,6 +20,7 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
     events?: EventSource
   }) => {
     const abort = new AbortController()
+    const diagnostics = useDiagnostics()
     let sse: AbortController | undefined
 
     function createSDK() {
@@ -57,16 +60,36 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
       queue = []
       timer = undefined
       last = Date.now()
-      // Batch all event emissions so all store updates result in a single render
-      batch(() => {
-        for (const event of events) {
-          emitter.emit("event", event)
-        }
-      })
+      diagnostics.measureSync(
+        {
+          name: "event.flush",
+          count: events.length,
+          firstEventID: events[0] ? diagnostics.correlate(events[0].payload) : undefined,
+          lastEventID: events.at(-1) ? diagnostics.correlate(events.at(-1)!.payload) : undefined,
+        },
+        () => {
+          // Batch all event emissions so all store updates result in a single render
+          batch(() => {
+            for (const event of events) emitter.emit("event", event)
+          })
+        },
+      )
     }
 
     const handleEvent = (event: GlobalEvent) => {
       queue.push(event)
+      diagnostics.emit({
+        type: "event.queued",
+        eventID: diagnostics.correlate(event.payload),
+        eventType: event.payload.type,
+        queueSize: queue.length,
+        context: {
+          directory: event.directory,
+          projectID: event.project,
+          sessionID: sessionID(event.payload),
+          workspaceID: event.workspace,
+        },
+      })
       const elapsed = Date.now() - last
 
       if (timer) return
@@ -113,7 +136,10 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
           const backoff = Math.min(retryDelay * 2 ** (attempt - 1), maxRetryDelay)
           await new Promise((resolve) => setTimeout(resolve, backoff))
         }
-      })().catch(() => {})
+      })().catch((error) => {
+        if (abort.signal.aborted || ctrl.signal.aborted) return
+        diagnostics.emit({ type: "diagnostics.error", stage: "event.stream", error: errorDetails(error) })
+      })
     }
 
     onMount(async () => {

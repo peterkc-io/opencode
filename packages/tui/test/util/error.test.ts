@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { errorData, errorFormat, errorMessage } from "../../src/util/error"
+import { errorData, errorFormat, errorMessage, isFatalRendererAllocationError } from "../../src/util/error"
 
 describe("util.error", () => {
   test("formats native Error instances", () => {
@@ -45,5 +45,13 @@ describe("util.error", () => {
     const data = errorData(err)
     expect(data.message).toBe("ResolveMessage: Cannot resolve module")
     expect(String(data.formatted)).toContain("ResolveMessage")
+  })
+
+  test("classifies native text and editor allocation failures as fatal", () => {
+    for (const name of ["TextBuffer", "TextBufferView", "EditorView", "EditBuffer", "SyntaxStyle"]) {
+      expect(isFatalRendererAllocationError(new Error(`Failed to create ${name}`))).toBe(true)
+    }
+    expect(isFatalRendererAllocationError(new Error("TextBuffer is destroyed"))).toBe(false)
+    expect(isFatalRendererAllocationError(new Error("Failed to create renderer"))).toBe(false)
   })
 })

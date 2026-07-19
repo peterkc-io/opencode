@@ -85,7 +85,7 @@ import { createTuiAttention } from "./attention"
 import * as TuiAudio from "./audio"
 import { win32DisableProcessedInput, win32FlushInputBuffer } from "./terminal-win32"
 import { destroyRenderer } from "./util/renderer"
-import { cliErrorMessage, errorFormat } from "./util/error"
+import { cliErrorMessage, errorFormat, isFatalRendererAllocationError } from "./util/error"
 import * as TuiDiagnostics from "./diagnostics/service"
 import { errorDetails } from "./diagnostics/event"
 import { instrumentRenderer, instrumentStdout } from "./diagnostics/renderer"
@@ -190,15 +190,27 @@ function isVersionGreater(left: string, right: string) {
 function rendererLifecycle(diagnostics: TuiDiagnostics.TuiDiagnostics) {
   let started = false
   let completed = false
+  let deferred = false
   return {
-    destroy(renderer: Parameters<typeof destroyRenderer>[0]) {
-      if (!renderer.isDestroyed && !started) {
+    destroy(renderer: Parameters<typeof destroyRenderer>[0], diagnosticsAfter = false) {
+      const active = !renderer.isDestroyed
+      if (active && !started && !diagnosticsAfter) {
         started = true
         diagnostics.emit({ type: "renderer.destroying" })
       }
+      deferred = active && diagnosticsAfter
       destroyRenderer(renderer)
+      deferred = false
+      if (!active || !diagnosticsAfter || completed) return
+      if (!started) {
+        started = true
+        diagnostics.emit({ type: "renderer.destroying" })
+      }
+      completed = true
+      diagnostics.emit({ type: "renderer.destroyed" })
     },
     destroyed() {
+      if (deferred) return
       if (!started) {
         started = true
         diagnostics.emit({ type: "renderer.destroying" })
@@ -251,6 +263,11 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
             lifecycle.destroy(renderer)
           }),
       )
+      const requestExit = (reason?: unknown, diagnosticsAfter = false) => {
+        if (reason !== undefined) exit.reason = reason
+        if (renderer.isDestroyed) return
+        lifecycle.destroy(renderer, diagnosticsAfter)
+      }
       yield* Effect.acquireRelease(
         Effect.sync(() => instrumentRenderer(diagnostics, renderer)),
         (restore) => Effect.sync(restore),
@@ -272,15 +289,15 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
       )
       yield* Effect.addFinalizer(() => Effect.sync(TuiAudio.dispose))
       const shutdown = yield* Deferred.make<unknown>()
-      const onSighup = () => lifecycle.destroy(renderer)
-      yield* Effect.acquireRelease(
-        Effect.sync(() => process.on("SIGHUP", onSighup)),
-        () => Effect.sync(() => process.off("SIGHUP", onSighup)),
-      )
       renderer.once("destroy", () => {
         lifecycle.destroyed()
         Deferred.doneUnsafe(shutdown, Effect.void)
       })
+      const onSighup = () => requestExit()
+      yield* Effect.acquireRelease(
+        Effect.sync(() => process.on("SIGHUP", onSighup)),
+        () => Effect.sync(() => process.off("SIGHUP", onSighup)),
+      )
       const pluginRuntime = createPluginRuntime()
 
       yield* Effect.tryPromise({
@@ -294,16 +311,18 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
             await render(() => {
               return (
                 <DiagnosticsProvider value={diagnostics}>
-                  <ExitProvider
-                    exit={(reason) => {
-                      if (renderer.isDestroyed) return
-                      exit.reason = reason
-                      lifecycle.destroy(renderer)
-                    }}
-                  >
+                  <ExitProvider exit={requestExit}>
                     <EpilogueProvider set={(value) => (exit.epilogue = value)}>
                       <ErrorBoundary
                         fallback={(error, reset) => {
+                          if (isFatalRendererAllocationError(error)) {
+                            exit.reason = error
+                            queueMicrotask(() => {
+                              requestExit(undefined, true)
+                              diagnostics.emit({ type: "diagnostics.error", stage: "ui", error: errorDetails(error) })
+                            })
+                            return null
+                          }
                           diagnostics.emit({ type: "diagnostics.error", stage: "ui", error: errorDetails(error) })
                           return <ErrorComponent error={error} reset={reset} mode={mode} />
                         }}
@@ -416,8 +435,11 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
   )
   yield* Effect.sync(() => {
     win32FlushInputBuffer()
-    if (result.reason !== undefined)
-      process.stderr.write((cliErrorMessage(result.reason) ?? errorFormat(result.reason)) + "\n")
+    if (result.reason !== undefined) {
+      const message = cliErrorMessage(result.reason) ?? errorFormat(result.reason)
+      if (!process.exitCode) process.exitCode = 1
+      process.stderr.write(message + "\n")
+    }
     if (result.epilogue) process.stdout.write(result.epilogue + "\n")
   })
 })

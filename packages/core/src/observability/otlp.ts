@@ -1,8 +1,8 @@
 import { Layer } from "effect"
-import { OtlpLogger } from "effect/unstable/observability"
+import { OtlpLogger, OtlpMetrics } from "effect/unstable/observability"
 import { Flag } from "../flag/flag"
 import { InstallationChannel, InstallationVersion } from "../installation/version"
-import { runID } from "./shared"
+import { COMPONENT_ENV, instanceID, runID } from "./shared"
 
 const endpoint = Flag.OTEL_EXPORTER_OTLP_ENDPOINT
 
@@ -41,8 +41,12 @@ export function resource(): { serviceName: string; serviceVersion: string; attri
       ...resourceAttributes(),
       "deployment.environment.name": InstallationChannel,
       "opencode.client": Flag.OPENCODE_CLIENT,
+      "opencode.component": process.env[COMPONENT_ENV] ?? "cli",
       "opencode.run": runID,
-      "service.instance.id": runID,
+      "process.pid": String(process.pid),
+      "service.name": "opencode",
+      "service.instance.id": instanceID,
+      "service.version": InstallationVersion,
     },
   }
 }
@@ -50,6 +54,18 @@ export function resource(): { serviceName: string; serviceVersion: string; attri
 export function loggers() {
   if (!endpoint) return []
   return [OtlpLogger.make({ url: `${endpoint}/v1/logs`, resource: resource(), headers })]
+}
+
+export function metricsLayer() {
+  if (!endpoint) return Layer.empty
+  const interval = Number(process.env.OTEL_METRIC_EXPORT_INTERVAL)
+  return OtlpMetrics.layer({
+    url: `${endpoint}/v1/metrics`,
+    resource: resource(),
+    headers,
+    exportInterval: Number.isFinite(interval) && interval > 0 ? interval : undefined,
+    temporality: "cumulative",
+  })
 }
 
 export async function tracingLayer() {

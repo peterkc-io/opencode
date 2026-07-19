@@ -60,6 +60,9 @@ export const Flag = {
   get OPENCODE_TUI_CONFIG() {
     return process.env["OPENCODE_TUI_CONFIG"]
   },
+  get OPENCODE_EXPERIMENTAL_TUI_DIAGNOSTICS() {
+    return truthy("OPENCODE_EXPERIMENTAL_TUI_DIAGNOSTICS")
+  },
   get OPENCODE_CONFIG_DIR() {
     return process.env["OPENCODE_CONFIG_DIR"]
   },

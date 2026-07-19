@@ -2146,4 +2146,38 @@ describe("tool.task", () => {
       expect((yield* jobs.get(grandchild.id))?.status).toBe("cancelled")
     }),
   )
+
+  it.instance("cancelling a parent run catches descendants registered during cancellation", () =>
+    Effect.gen(function* () {
+      const jobs = yield* BackgroundJob.Service
+      const runState = yield* SessionRunState.Service
+      const sessions = yield* Session.Service
+      const { chat } = yield* seed()
+      const child = yield* sessions.create({ parentID: chat.id, title: "child" })
+      const lateID = "late-descendant"
+
+      yield* jobs.start({
+        id: child.id,
+        type: "task",
+        metadata: { parentSessionId: chat.id, sessionId: child.id },
+        run: Effect.never.pipe(
+          Effect.ensuring(
+            jobs
+              .start({
+                id: lateID,
+                type: "task",
+                metadata: { parentSessionId: child.id },
+                run: Effect.never,
+              })
+              .pipe(Effect.asVoid),
+          ),
+        ),
+      })
+
+      yield* runState.cancel(chat.id)
+
+      expect((yield* jobs.get(child.id))?.status).toBe("cancelled")
+      expect((yield* jobs.get(lateID))?.status).toBe("cancelled")
+    }),
+  )
 })

@@ -12,13 +12,13 @@ export type WaitInput = CoreBackgroundJob.WaitInput
 export type WaitResult = CoreBackgroundJob.WaitResult
 
 export interface Interface extends CoreBackgroundJob.Interface {
+  readonly cancelSession: (sessionID: string) => Effect.Effect<void>
   readonly cancelSessionAt: (input: { directory: string; sessionID: string }) => Effect.Effect<void>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/BackgroundJob") {}
 
 const cancelSession = Effect.fnUntraced(function* (jobs: CoreBackgroundJob.Interface, sessionID: string) {
-  const items = yield* jobs.list()
   const pending = new Set([sessionID])
   const cancelled = new Set<string>()
   const matches = (job: CoreBackgroundJob.Info) => {
@@ -28,8 +28,9 @@ const cancelSession = Effect.fnUntraced(function* (jobs: CoreBackgroundJob.Inter
     return typeof job.metadata?.parentSessionId === "string" && pending.has(job.metadata.parentSessionId)
   }
 
-  let batch = items.filter(matches)
-  while (batch.length > 0) {
+  while (true) {
+    const batch = (yield* jobs.list()).filter(matches)
+    if (batch.length === 0) return
     yield* Effect.forEach(
       batch,
       (job) =>
@@ -44,7 +45,6 @@ const cancelSession = Effect.fnUntraced(function* (jobs: CoreBackgroundJob.Inter
         ),
       { concurrency: "unbounded", discard: true },
     )
-    batch = items.filter(matches)
   }
 })
 
@@ -71,6 +71,7 @@ const layer = Layer.effect(
       waitForPromotion: (id) => InstanceState.useEffect(state, (jobs) => jobs.waitForPromotion(id)),
       promote: (id) => InstanceState.useEffect(state, (jobs) => jobs.promote(id)),
       cancel: (id) => InstanceState.useEffect(state, (jobs) => jobs.cancel(id)),
+      cancelSession: (sessionID) => InstanceState.useEffect(state, (jobs) => cancelSession(jobs, sessionID)),
       cancelSessionAt,
     })
   }),

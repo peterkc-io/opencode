@@ -19,6 +19,7 @@ import { InstanceStore } from "../../src/project/instance-store"
 import { TestLLMServer } from "../lib/llm-server"
 
 const noopBootstrap = Layer.succeed(InstanceBootstrap.Service, InstanceBootstrap.Service.of({ run: Effect.void }))
+export const testInstanceBootstrapLayer = noopBootstrap
 export const testInstanceStoreLayer = LayerNode.compile(InstanceStore.node, [
   [InstanceStore.bootstrapNode, noopBootstrap],
 ])

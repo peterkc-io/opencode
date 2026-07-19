@@ -1,5 +1,6 @@
-import { afterEach, describe, expect } from "bun:test"
+import { afterEach, describe, expect, test } from "bun:test"
 import path from "path"
+import fs from "fs/promises"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Cause, Deferred, Effect, Exit, Fiber } from "effect"
@@ -75,8 +76,99 @@ const gitResult = Effect.fn("WorktreeTest.gitResult")(function* (cwd: string, ar
   return yield* service.run(args, { cwd })
 })
 
+const withLinkedWorktree = <A, E, R>(use: (info: Worktree.Info) => Effect.Effect<A, E, R>) =>
+  Effect.acquireUseRelease(
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const svc = yield* Worktree.Service
+      const info = yield* svc.makeWorktreeInfo({ name: `resolve-${Date.now()}` })
+      if (!info.branch) throw new Error("linked worktree test requires a branch")
+      yield* git(test.directory, ["worktree", "add", "-b", info.branch, info.directory])
+      return info
+    }).pipe(Effect.orDie),
+    use,
+    (info) => removeCreatedWorktree(info.directory).pipe(Effect.ignore),
+  )
+
 describe("Worktree", () => {
   afterEach(() => disposeAllInstances())
+
+  describe("parseWorktreePorcelain", () => {
+    test("parses NUL-delimited paths without unquoting whitespace", () => {
+      expect(
+        Worktree.parseWorktreePorcelain(
+          "worktree /tmp/primary root\0HEAD abc123\0branch refs/heads/dev\0\0" +
+            "worktree /tmp/linked root\0HEAD def456\0detached\0locked maintenance window\0\0",
+        ),
+      ).toEqual([
+        { worktree: "/tmp/primary root", HEAD: "abc123", branch: "refs/heads/dev" },
+        { worktree: "/tmp/linked root", HEAD: "def456", detached: true, locked: "maintenance window" },
+      ])
+    })
+
+    test("preserves prunable metadata for fail-closed target validation", () => {
+      expect(
+        Worktree.parseWorktreePorcelain(
+          "worktree /tmp/stale\0HEAD abc123\0branch refs/heads/stale\0prunable gitdir file points to non-existent location\0\0",
+        )[0]?.prunable,
+      ).toContain("non-existent")
+    })
+
+    for (const input of [
+      "HEAD abc123\0\0",
+      "worktree /tmp/a\0HEAD abc123\0HEAD def456\0\0",
+      "worktree /tmp/a\0HEAD abc123\0unknown value\0\0",
+      "worktree /tmp/a\0HEAD abc123",
+      "worktree /tmp/a\0worktree /tmp/b\0HEAD abc123\0\0",
+    ]) {
+      test(`rejects malformed porcelain: ${JSON.stringify(input)}`, () => {
+        expect(() => Worktree.parseWorktreePorcelain(input)).toThrow()
+      })
+    }
+  })
+
+  describe("resolveLinked", () => {
+    it.instance(
+      "accepts an exact linked worktree and a symlink to it",
+      () =>
+        withLinkedWorktree((info) =>
+          Effect.gen(function* () {
+            const test = yield* TestInstance
+            const svc = yield* Worktree.Service
+            const link = path.join(test.directory, "linked-alias")
+            yield* Effect.promise(() => fs.symlink(info.directory, link))
+            const directory = yield* Effect.promise(() => fs.realpath(info.directory))
+
+            expect((yield* svc.resolveLinked(info.directory)).directory).toBe(directory)
+            expect((yield* svc.resolveLinked(link)).directory).toBe(directory)
+          }),
+        ),
+      { git: true },
+      15_000,
+    )
+
+    it.instance(
+      "rejects primary, relative, subdirectory, and unlinked targets",
+      () =>
+        withLinkedWorktree((info) =>
+          Effect.gen(function* () {
+            const test = yield* TestInstance
+            const svc = yield* Worktree.Service
+            const unlinked = path.join(test.directory, "unlinked")
+            yield* Effect.promise(() => fs.mkdir(unlinked))
+
+            for (const target of [test.directory, "relative", path.join(info.directory, "subdir"), unlinked]) {
+              if (target.endsWith("subdir")) yield* Effect.promise(() => fs.mkdir(target))
+              const exit = yield* svc.resolveLinked(target).pipe(Effect.exit)
+              expect(Exit.isFailure(exit)).toBe(true)
+              if (Exit.isFailure(exit)) expect(Cause.squash(exit.cause)).toBeInstanceOf(Worktree.InvalidTargetError)
+            }
+          }),
+        ),
+      { git: true },
+      15_000,
+    )
+  })
 
   describe("makeWorktreeInfo", () => {
     it.instance(

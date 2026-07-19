@@ -56,6 +56,8 @@ import { SessionTable } from "@opencode-ai/core/session/sql"
 import { SessionReminders } from "./reminders"
 import { SessionTools } from "./tools"
 import { LLMEvent } from "@opencode-ai/llm"
+import { BackgroundJob } from "@/background/job"
+import { NotFoundError as StorageNotFoundError } from "@/storage/storage"
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -140,6 +142,7 @@ const layer = Layer.effect(
     const events = yield* EventV2Bridge.Service
     const flags = yield* RuntimeFlags.Service
     const database = yield* Database.Service
+    const background = yield* BackgroundJob.Service
     const { db } = database
     const ops = Effect.fn("SessionPrompt.ops")(function* () {
       return {
@@ -150,6 +153,15 @@ const layer = Layer.effect(
     })
 
     const cancel = Effect.fn("SessionPrompt.cancel")(function* (sessionID: SessionID) {
+      const found = yield* sessions.assertInstanceDirectory(sessionID).pipe(
+        Effect.map(Option.some),
+        Effect.catchIf(StorageNotFoundError.isInstance, () => Effect.succeed(Option.none())),
+        Effect.orDie,
+      )
+      if (Option.isNone(found)) return
+      const session = found.value
+      const placement = yield* Session.taskPlacement(session).pipe(Effect.orDie)
+      if (placement) yield* background.cancelSessionAt({ directory: placement.ownerDirectory, sessionID })
       yield* Effect.logInfo("cancel", { "session.id": sessionID })
       yield* state.cancel(sessionID)
     })
@@ -1052,7 +1064,7 @@ const layer = Layer.effect(
     const prompt: (input: PromptInput) => Effect.Effect<SessionV1.WithParts, Image.Error> = Effect.fn(
       "SessionPrompt.prompt",
     )(function* (input: PromptInput) {
-      const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+      const session = yield* sessions.assertInstanceDirectory(input.sessionID).pipe(Effect.orDie)
       yield* revert.cleanup(session)
       const message = yield* createUserMessage(input)
       yield* sessions.touch(input.sessionID)
@@ -1343,17 +1355,20 @@ const layer = Layer.effect(
     const loop: (input: LoopInput) => Effect.Effect<SessionV1.WithParts> = Effect.fn("SessionPrompt.loop")(function* (
       input: LoopInput,
     ) {
+      yield* sessions.assertInstanceDirectory(input.sessionID).pipe(Effect.orDie)
       return yield* state.ensureRunning(input.sessionID, lastAssistant(input.sessionID), runLoop(input.sessionID))
     })
 
     const shell: (input: ShellInput) => Effect.Effect<SessionV1.WithParts, Session.BusyError> = Effect.fn(
       "SessionPrompt.shell",
     )(function* (input: ShellInput) {
+      yield* sessions.assertInstanceDirectory(input.sessionID).pipe(Effect.orDie)
       const ready = yield* Latch.make()
       return yield* state.startShell(input.sessionID, lastAssistant(input.sessionID), shellImpl(input, ready), ready)
     })
 
     const command = Effect.fn("SessionPrompt.command")(function* (input: CommandInput) {
+      yield* sessions.assertInstanceDirectory(input.sessionID).pipe(Effect.orDie)
       yield* Effect.logInfo("command", {
         "session.id": input.sessionID,
         command: input.command,
@@ -1625,6 +1640,7 @@ export const node = LayerNode.make({
     EventV2Bridge.node,
     RuntimeFlags.node,
     Database.node,
+    BackgroundJob.node,
   ],
 })
 

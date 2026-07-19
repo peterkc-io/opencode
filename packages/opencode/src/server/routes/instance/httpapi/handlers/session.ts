@@ -82,6 +82,13 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       return yield* SessionError.mapStorageNotFound(session.get(sessionID))
     })
 
+    const requireBoundSession = Effect.fn("SessionHttpApi.requireBoundSession")(function* (sessionID: SessionID) {
+      return yield* session.assertInstanceDirectory(sessionID).pipe(
+        Effect.catchTag("SessionDirectoryMismatchError", () => Effect.fail(new HttpApiError.BadRequest({}))),
+        SessionError.mapStorageNotFound,
+      )
+    })
+
     const get = Effect.fn("SessionHttpApi.get")(function* (ctx: { params: { sessionID: SessionID } }) {
       return yield* requireSession(ctx.params.sessionID)
     })
@@ -153,7 +160,28 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     })
 
     const create = Effect.fn("SessionHttpApi.create")(function* (ctx: { payload?: Session.CreateInput }) {
-      return yield* shareSvc.create(ctx.payload)
+      if (ctx.payload?.metadata && Object.hasOwn(ctx.payload.metadata, "taskPlacement")) {
+        return yield* new HttpApiError.BadRequest({})
+      }
+      const workspaceID = yield* InstanceState.workspaceID
+      if (ctx.payload?.workspaceID !== undefined && ctx.payload.workspaceID !== workspaceID) {
+        return yield* new HttpApiError.BadRequest({})
+      }
+      if (ctx.payload?.parentID) {
+        const parent = yield* session
+          .get(ctx.payload.parentID)
+          .pipe(Effect.catchTag("NotFoundError", () => Effect.fail(new HttpApiError.BadRequest({}))))
+        const instance = yield* InstanceState.context
+        if (parent.projectID !== instance.project.id || parent.workspaceID !== workspaceID) {
+          return yield* new HttpApiError.BadRequest({})
+        }
+      }
+      return yield* shareSvc.create(ctx.payload).pipe(
+        Effect.catchCauseIf(
+          (cause) => Cause.squash(cause) instanceof Session.ParentMismatchError,
+          () => Effect.fail(new HttpApiError.BadRequest({})),
+        ),
+      )
     })
 
     const createRaw = Effect.fn("SessionHttpApi.createRaw")(function* (ctx: {
@@ -184,6 +212,9 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       params: { sessionID: SessionID }
       payload: typeof UpdatePayload.Type
     }) {
+      if (ctx.payload.metadata && Object.hasOwn(ctx.payload.metadata, "taskPlacement")) {
+        return yield* new HttpApiError.BadRequest({})
+      }
       const current = yield* requireSession(ctx.params.sessionID)
       if (ctx.payload.title !== undefined) {
         yield* session.setTitle({ sessionID: ctx.params.sessionID, title: ctx.payload.title })
@@ -274,7 +305,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       params: { sessionID: SessionID }
       payload: typeof SummarizePayload.Type
     }) {
-      yield* revertSvc.cleanup(yield* requireSession(ctx.params.sessionID))
+      yield* revertSvc.cleanup(yield* requireBoundSession(ctx.params.sessionID))
       const messages = yield* SessionError.mapStorageNotFound(session.messages({ sessionID: ctx.params.sessionID }))
       const defaultAgent = yield* agentSvc.defaultAgent()
       const currentAgent = messages.findLast((message) => message.info.role === "user")?.info.agent ?? defaultAgent
@@ -350,12 +381,12 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       params: { sessionID: SessionID }
       payload: typeof RevertPayload.Type
     }) {
-      yield* requireSession(ctx.params.sessionID)
+      yield* requireBoundSession(ctx.params.sessionID)
       return yield* SessionError.mapBusy(revertSvc.revert({ sessionID: ctx.params.sessionID, ...ctx.payload }))
     })
 
     const unrevert = Effect.fn("SessionHttpApi.unrevert")(function* (ctx: { params: { sessionID: SessionID } }) {
-      yield* requireSession(ctx.params.sessionID)
+      yield* requireBoundSession(ctx.params.sessionID)
       return yield* SessionError.mapBusy(revertSvc.unrevert({ sessionID: ctx.params.sessionID }))
     })
 

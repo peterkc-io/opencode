@@ -52,6 +52,7 @@ describe("RuntimeFlags", () => {
       expect(flags.enableQuestionTool).toBe(true)
       expect(flags.experimentalReferences).toBe(true)
       expect(flags.experimentalBackgroundSubagents).toBe(true)
+      expect(flags.experimentalSubagentWorktrees).toBe(true)
       expect(flags.experimentalLspTy).toBe(false)
       expect(flags.experimentalLspTool).toBe(true)
       expect(flags.experimentalOxfmt).toBe(true)
@@ -217,6 +218,31 @@ describe("RuntimeFlags", () => {
       expect(flags.experimentalIconDiscovery).toBe(false)
     }),
   )
+
+  for (const input of [
+    { name: "defaults to disabled", config: {}, expected: false },
+    {
+      name: "dedicated flag enables it",
+      config: { OPENCODE_EXPERIMENTAL_SUBAGENT_WORKTREES: "true" },
+      expected: true,
+    },
+    { name: "inherits the umbrella flag", config: { OPENCODE_EXPERIMENTAL: "true" }, expected: true },
+    {
+      name: "dedicated false overrides the umbrella",
+      config: {
+        OPENCODE_EXPERIMENTAL: "true",
+        OPENCODE_EXPERIMENTAL_SUBAGENT_WORKTREES: "false",
+      },
+      expected: false,
+    },
+  ]) {
+    it.effect(`resolves experimentalSubagentWorktrees: ${input.name}`, () =>
+      Effect.gen(function* () {
+        const flags = yield* readFlags.pipe(Effect.provide(fromConfig(input.config)))
+        expect(flags.experimentalSubagentWorktrees).toBe(input.expected)
+      }),
+    )
+  }
 
   it.effect("experimentalOxfmt defaults to false", () =>
     Effect.gen(function* () {

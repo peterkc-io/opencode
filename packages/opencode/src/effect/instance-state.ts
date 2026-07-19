@@ -9,6 +9,7 @@ const TypeId = "~opencode/InstanceState"
 export interface InstanceState<A, E = never, R = never> {
   readonly [TypeId]: typeof TypeId
   readonly cache: ScopedCache.ScopedCache<string, A, E, R>
+  readonly key: (directory: string) => string
 }
 
 export const context = Effect.gen(function* () {
@@ -25,6 +26,7 @@ export const directory = Effect.map(context, (ctx) => ctx.directory)
 
 export const make = <A, E = never, R = never>(
   init: (ctx: InstanceContext) => Effect.Effect<A, E, R | Scope.Scope>,
+  key: (directory: string) => string = (directory) => directory,
 ): Effect.Effect<InstanceState<A, E, Exclude<R, Scope.Scope>>, never, R | Scope.Scope> =>
   Effect.gen(function* () {
     const cache = yield* ScopedCache.make<string, A, E, R>({
@@ -35,18 +37,19 @@ export const make = <A, E = never, R = never>(
         }),
     })
 
-    const off = registerDisposer((directory) => Effect.runPromise(ScopedCache.invalidate(cache, directory)))
+    const off = registerDisposer((directory) => Effect.runPromise(ScopedCache.invalidate(cache, key(directory))))
     yield* Effect.addFinalizer(() => Effect.sync(off))
 
     return {
       [TypeId]: TypeId,
       cache,
+      key,
     }
   })
 
 export const get = <A, E, R>(self: InstanceState<A, E, R>) =>
   Effect.gen(function* () {
-    return yield* ScopedCache.get(self.cache, yield* directory)
+    return yield* ScopedCache.get(self.cache, self.key(yield* directory))
   })
 
 export const use = <A, E, R, B>(self: InstanceState<A, E, R>, select: (value: A) => B) => Effect.map(get(self), select)
@@ -58,12 +61,12 @@ export const useEffect = <A, E, R, B, E2, R2>(
 
 export const has = <A, E, R>(self: InstanceState<A, E, R>) =>
   Effect.gen(function* () {
-    return yield* ScopedCache.has(self.cache, yield* directory)
+    return yield* ScopedCache.has(self.cache, self.key(yield* directory))
   })
 
 export const invalidate = <A, E, R>(self: InstanceState<A, E, R>) =>
   Effect.gen(function* () {
-    return yield* ScopedCache.invalidate(self.cache, yield* directory)
+    return yield* ScopedCache.invalidate(self.cache, self.key(yield* directory))
   })
 
 export * as InstanceState from "./instance-state"

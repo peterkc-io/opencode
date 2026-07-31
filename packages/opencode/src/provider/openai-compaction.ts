@@ -182,6 +182,7 @@ function requestURL(input: RequestInfo | URL) {
 
 function requestBody(input: RequestInfo | URL, init?: RequestInit) {
   if (typeof init?.body === "string") return init.body
+  if (init?.body !== undefined && init.body !== null) return Promise.resolve(undefined)
   if (input instanceof Request) return input.clone().text()
   return Promise.resolve(undefined)
 }

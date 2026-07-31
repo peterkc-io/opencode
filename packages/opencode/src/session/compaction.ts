@@ -67,6 +67,14 @@ function summaryText(message: SessionV1.WithParts) {
   return text || undefined
 }
 
+function openAIFallback(
+  reason: SessionV1.OpenAICompactionFallback["reason"],
+  time: number,
+  statusCode?: number,
+): SessionV1.OpenAICompactionFallback {
+  return { status: "fallback", reason, statusCode, time }
+}
+
 function completedCompactions(messages: SessionV1.WithParts[]) {
   const users = new Map<MessageID, number>()
   for (let i = 0; i < messages.length; i++) {
@@ -255,15 +263,8 @@ const layer = Layer.effect(
       model: Provider.Model
     }) {
       const attemptedAt = Date.now()
-      const fallback = (
-        reason: SessionV1.OpenAICompactionFallback["reason"],
-        statusCode?: number,
-      ): SessionV1.OpenAICompactionFallback => ({
-        status: "fallback",
-        reason,
-        statusCode,
-        time: attemptedAt,
-      })
+      const fallback = (reason: SessionV1.OpenAICompactionFallback["reason"], statusCode?: number) =>
+        openAIFallback(reason, attemptedAt, statusCode)
       const info = yield* provider.getProvider(input.model.providerID)
       const credentials = yield* auth.get(input.model.providerID).pipe(Effect.catch(() => Effect.succeed(undefined)))
       const credentialSalt = crypto.randomUUID()
@@ -613,12 +614,7 @@ const layer = Layer.effect(
               Effect.catchCause((cause) =>
                 Cause.hasInterrupts(cause)
                   ? Effect.failCause(cause)
-                  : Effect.succeed({
-                      status: "fallback" as const,
-                      reason: "internal_error" as const,
-                      statusCode: undefined,
-                      time: Date.now(),
-                    }),
+                  : Effect.succeed(openAIFallback("internal_error", Date.now())),
               ),
             )
           : undefined

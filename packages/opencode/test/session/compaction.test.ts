@@ -28,6 +28,7 @@ import { testEffect } from "../lib/effect"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { TestConfig } from "../fixture/config"
 import { RuntimeFlags } from "@/effect/runtime-flags"
+import { Auth } from "@/auth"
 import { LLMEvent, Usage } from "@opencode-ai/llm"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
@@ -254,6 +255,7 @@ type CompactionProcessOptions = {
   plugin?: Layer.Layer<Plugin.Service>
   provider?: ReturnType<typeof wide>
   config?: Layer.Layer<Config.Service>
+  auth?: Layer.Layer<Auth.Service>
 }
 
 function withCompaction(options?: CompactionProcessOptions) {
@@ -265,6 +267,7 @@ function compactionProcessLayer(options?: CompactionProcessOptions) {
     [Provider.node, (options?.provider ?? wide()).layer],
     [RuntimeFlags.node, RuntimeFlags.layer({ experimentalEventSystem: true })],
     [SessionSummary.node, summary],
+    ...(options?.auth ? ([[Auth.node, options.auth]] as const) : []),
   ]
   if (!options?.llm) {
     return AppNodeBuilder.build(compactionTestNode, [
@@ -894,7 +897,9 @@ describe("session.compaction.process", () => {
           openai: {
             status: "success",
             responseID: "resp_1",
+            providerID: model.providerID,
             modelID: model.id,
+            apiModelID: model.api.id,
             authType: "api",
             baseURL: "https://api.openai.test/v1",
             credentialSalt: expect.any(String),
@@ -935,6 +940,85 @@ describe("session.compaction.process", () => {
         expect(replayed).toEqual(expect.arrayContaining(canonical))
         expect(JSON.stringify(replayed)).not.toContain("local summary")
       }).pipe(withCompaction({ provider }))
+    },
+    { git: true },
+  )
+
+  itCompaction.instance(
+    "persists OAuth binding and rejects a missing account ID",
+    () => {
+      let accountId: string | undefined = "account"
+      const requests: Array<{ headers: Headers; body: Record<string, unknown> }> = []
+      const model = ProviderTest.model({
+        id: ModelV2.ID.make("gpt-5.6"),
+        providerID: ProviderV2.ID.make("openai"),
+        api: { id: "gpt-5.6", url: "https://api.openai.test/v1", npm: "@ai-sdk/openai" },
+        options: { serviceTier: "priority" },
+      })
+      const provider = ProviderTest.fake({
+        model,
+        info: ProviderTest.info(
+          {
+            options: {
+              apiKey: "oauth-dummy-key",
+              fetch: async (_input: RequestInfo | URL, init?: RequestInit) => {
+                if (typeof init?.body !== "string") throw new Error("Expected JSON request body")
+                requests.push({ headers: new Headers(init.headers), body: JSON.parse(init.body) })
+                return Response.json({
+                  id: "resp_oauth",
+                  output: [{ id: "cmp_oauth", type: "compaction", encrypted_content: "encrypted" }],
+                })
+              },
+            },
+          },
+          model,
+        ),
+      })
+      const credentials = () => ({
+        type: "oauth" as const,
+        refresh: "refresh",
+        access: "access",
+        expires: Date.now() + 60_000,
+        ...(accountId ? { accountId } : {}),
+      })
+      const auth = Layer.mock(Auth.Service)({
+        get: () => Effect.sync(credentials),
+        all: () => Effect.sync(() => ({ [model.providerID]: credentials() })),
+      })
+      const modelRef = { providerID: model.providerID, modelID: model.id }
+      return Effect.gen(function* () {
+        const ssn = yield* SessionNs.Service
+        const compact = (sessionID: SessionID) =>
+          Effect.gen(function* () {
+            yield* createUserMessage(sessionID, "history", modelRef)
+            yield* createSummaryCompaction(sessionID, modelRef)
+            const msgs = yield* ssn.messages({ sessionID })
+            const parentID = msgs.at(-1)?.info.id
+            if (!parentID) return yield* Effect.die("Missing compaction parent")
+            expect(yield* SessionCompaction.use.process({ parentID, messages: msgs, sessionID, auto: false })).toBe(
+              "continue",
+            )
+            return yield* readCompactionPart(sessionID)
+          })
+
+        const success = yield* ssn.create({})
+        expect((yield* compact(success.id))?.openai).toMatchObject({
+          status: "success",
+          authType: "oauth",
+          responseID: "resp_oauth",
+        })
+        expect(requests).toHaveLength(1)
+        expect(requests[0]?.headers.has("authorization")).toBe(false)
+        expect(requests[0]?.body.service_tier).toBe("priority")
+
+        accountId = undefined
+        const missingAccount = yield* ssn.create({})
+        expect((yield* compact(missingAccount.id))?.openai).toMatchObject({
+          status: "fallback",
+          reason: "unsupported_auth",
+        })
+        expect(requests).toHaveLength(1)
+      }).pipe(withCompaction({ provider, auth }))
     },
     { git: true },
   )

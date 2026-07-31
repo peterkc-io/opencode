@@ -1695,6 +1695,17 @@ describe("session.message-v2.latest", () => {
     }
 
     expect(MessageV2.openAICompaction([user, summary])).toEqual({ state: remote, summary: "local summary" })
+    const retried: SessionV1.WithParts = {
+      ...user,
+      parts: [
+        {
+          ...user.parts[0]!,
+          openai: { status: "fallback", reason: "network_error", time: 1 },
+        } as SessionV1.CompactionPart,
+        ...user.parts,
+      ],
+    }
+    expect(MessageV2.openAICompaction([retried, summary])).toEqual({ state: remote, summary: "local summary" })
     const retryID = MessageID.ascending()
     const retry: SessionV1.WithParts = {
       info: { ...summary.info, id: retryID } as SessionV1.Assistant,

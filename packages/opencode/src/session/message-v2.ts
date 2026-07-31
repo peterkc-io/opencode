@@ -577,7 +577,7 @@ export function openAICompaction(msgs: WithParts[]) {
     (msg) => msg.info.role === "user" && msg.parts.some((part) => part.type === "compaction"),
   )
   if (!boundary || boundary.info.role !== "user") return undefined
-  const part = boundary.parts.find((item): item is CompactionPart => item.type === "compaction")
+  const part = boundary.parts.findLast((item): item is CompactionPart => item.type === "compaction")
   if (part?.openai?.status !== "success") return undefined
   const summary = msgs.findLast(
     (msg) =>

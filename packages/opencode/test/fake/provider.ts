@@ -58,9 +58,9 @@ export namespace ProviderTest {
             if (providerID === row.id) return Effect.succeed(row)
             return Effect.die(new Error(`Unknown test provider: ${providerID}`))
           }),
-          getBaseURL: Effect.fn("TestProvider.getBaseURL")(() => {
+          getBaseURL: Effect.fn("TestProvider.getBaseURL")((model) => {
             const baseURL = row.options.baseURL
-            return Effect.succeed(typeof baseURL === "string" && baseURL !== "" ? baseURL : mdl.api.url || undefined)
+            return Effect.succeed(typeof baseURL === "string" && baseURL !== "" ? baseURL : model.api.url || undefined)
           }),
           getModel: Effect.fn("TestProvider.getModel")((providerID, modelID) => {
             if (providerID === row.id && modelID === mdl.id) return Effect.succeed(mdl)

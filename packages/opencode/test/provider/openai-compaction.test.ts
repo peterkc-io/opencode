@@ -23,7 +23,7 @@ const state = {
   credentialFingerprint: "fingerprint",
   output: canonical,
   time: 1,
-} as SessionV1.OpenAICompactionSuccess
+} satisfies SessionV1.OpenAICompactionSuccess
 
 const input = [
   { role: "developer", content: "current instructions" },
@@ -125,7 +125,10 @@ describe("OpenAICompaction", () => {
     Date.now = () => now
     try {
       let captured: RequestInit | undefined
+      const abandoned = OpenAICompaction.register({ state, summary: "local summary", oauth: false })
+      now += 5 * 60 * 1000 + 1
       const token = OpenAICompaction.register({ state, summary: "local summary", oauth: false })
+      expect(OpenAICompaction.release(abandoned)).toBeUndefined()
       const wrapped = OpenAICompaction.wrapFetch(async (_request, init) => {
         captured = init
         return new Response("{}")
@@ -197,6 +200,28 @@ describe("OpenAICompaction", () => {
     if (typeof captured?.body !== "string") throw new Error("Expected rewritten request body")
     expect(JSON.parse(captured.body).input).toEqual([input[0], ...canonical, input[3]])
     expect(OpenAICompaction.release(token)).toBeUndefined()
+
+    const binaryToken = OpenAICompaction.register({ state, summary: "local summary", oauth: false })
+    const binary = new Uint8Array([1, 2, 3])
+    let forwardedBody: BodyInit | null | undefined
+    const binaryWrapped = OpenAICompaction.wrapFetch(async (_input, init) => {
+      forwardedBody = init?.body
+      return new Response("{}")
+    })
+    await binaryWrapped(
+      new Request("https://api.openai.com/v1/responses", {
+        method: "POST",
+        body: JSON.stringify({ model: "gpt-5.6", input }),
+      }),
+      {
+        method: "POST",
+        headers: { [OpenAICompaction.TOKEN_HEADER]: binaryToken },
+        body: binary,
+      },
+    )
+    expect(forwardedBody).toBe(binary)
+    expect(OpenAICompaction.release(binaryToken)).toBe("invalid_request")
+
     expect(OpenAICompaction.headers({ authorization: "Bearer test", ignored: 1 })).toEqual({
       authorization: "Bearer test",
     })
@@ -281,6 +306,15 @@ describe("OpenAICompaction", () => {
         model,
         provider,
         auth: changedAuth,
+        baseURL,
+      }),
+    ).toBe(false)
+    expect(
+      OpenAICompaction.matches({
+        state: bound,
+        model,
+        provider: ProviderTest.info({}, model),
+        auth: undefined,
         baseURL,
       }),
     ).toBe(false)

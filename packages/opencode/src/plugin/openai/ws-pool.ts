@@ -2,8 +2,10 @@ import WebSocket from "ws"
 import { ProviderError } from "@/provider/error"
 import { isRecord } from "@/util/record"
 import { OpenAIWebSocket } from "./ws"
+import { OpenAICompaction } from "@/provider/openai-compaction"
 
 export const TITLE_HEADER = "x-opencode-title"
+const INTERNAL_HEADERS = [TITLE_HEADER, OpenAICompaction.HTTP_HEADER]
 
 export interface CreateWebSocketFetchOptions {
   httpFetch?: typeof globalThis.fetch
@@ -59,7 +61,7 @@ export function createWebSocketFetch(options?: CreateWebSocketFetchOptions) {
       }
     })()
     if (!body?.stream) return httpFetch(input, httpInit)
-    if (internalHeaders[TITLE_HEADER] === "true") {
+    if (internalHeaders[TITLE_HEADER] === "true" || internalHeaders[OpenAICompaction.HTTP_HEADER] === "true") {
       return httpFetch(input, httpInit)
     }
 
@@ -253,17 +255,22 @@ export function withoutInternalHeaders<T extends { headers?: HeadersInit }>(init
   if (!init?.headers) return init
   if (init.headers instanceof Headers) {
     const headers = new Headers(init.headers)
-    headers.delete(TITLE_HEADER)
+    for (const name of INTERNAL_HEADERS) headers.delete(name)
     return { ...init, headers }
   }
 
   if (Array.isArray(init.headers)) {
-    return { ...init, headers: init.headers.filter((item) => item[0].toLowerCase() !== TITLE_HEADER) }
+    return {
+      ...init,
+      headers: init.headers.filter((item) => !INTERNAL_HEADERS.includes(item[0].toLowerCase())),
+    }
   }
 
   return {
     ...init,
-    headers: Object.fromEntries(Object.entries(init.headers).filter(([key]) => key.toLowerCase() !== TITLE_HEADER)),
+    headers: Object.fromEntries(
+      Object.entries(init.headers).filter(([key]) => !INTERNAL_HEADERS.includes(key.toLowerCase())),
+    ),
   }
 }
 

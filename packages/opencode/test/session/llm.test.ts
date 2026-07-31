@@ -27,6 +27,7 @@ import { ModelV2 } from "@opencode-ai/core/model"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { LayerNodePlatform } from "@opencode-ai/core/effect/app-node-platform"
+import { OpenAICompaction } from "@/provider/openai-compaction"
 
 type ConfigModel = NonNullable<NonNullable<ConfigV1.Info["provider"]>[string]["models"]>[string]
 
@@ -1339,6 +1340,129 @@ describe("session.llm.stream", () => {
         const capture = yield* Effect.promise(() => request)
         expect(capture.url.pathname.endsWith("/responses")).toBe(true)
         expect(capture.body.model).toBe(resolved.api.id)
+      }),
+    { config: () => openAIConfig(loadFixture("openai", "gpt-5.2").model, `${state.server!.url.origin}/v1`) },
+  )
+
+  it.instance(
+    "replays canonical compaction output through the AI SDK request",
+    () =>
+      Effect.gen(function* () {
+        const model = loadFixture("openai", "gpt-5.2").model
+        const events = [
+          {
+            type: "response.created",
+            response: {
+              id: "resp-compaction-replay",
+              created_at: Math.floor(Date.now() / 1000),
+              model: model.id,
+              service_tier: null,
+            },
+          },
+          {
+            type: "response.completed",
+            response: {
+              incomplete_details: null,
+              usage: {
+                input_tokens: 1,
+                input_tokens_details: null,
+                output_tokens: 0,
+                output_tokens_details: null,
+              },
+              service_tier: null,
+            },
+          },
+        ]
+        const request = waitRequest("/responses", createEventResponse(events, true))
+        const resolved = yield* Provider.use.getModel(ProviderV2.ID.openai, ModelV2.ID.make(model.id))
+        const provider = yield* Provider.use.getProvider(ProviderV2.ID.openai)
+        const sessionID = SessionID.make("session-test-compaction-replay")
+        const salt = "compaction-salt"
+        const fingerprint = OpenAICompaction.credentialFingerprint(provider, undefined, salt)
+        expect(fingerprint).toBeTruthy()
+        const agent = {
+          name: "test",
+          mode: "primary",
+          options: {},
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        } satisfies Agent.Info
+        const canonical = { id: "cmp_1", type: "compaction", encrypted_content: "encrypted" }
+        const openAICompaction = {
+          summary: "local summary",
+          state: {
+            status: "success",
+            responseID: "resp_compact",
+            providerID: ProviderV2.ID.openai,
+            modelID: resolved.id,
+            apiModelID: resolved.api.id,
+            baseURL: `${state.server!.url.origin}/v1`,
+            authType: "api",
+            credentialSalt: salt,
+            credentialFingerprint: fingerprint!,
+            output: [canonical],
+            time: 1,
+          },
+        } satisfies NonNullable<LLM.StreamInput["openAICompaction"]>
+        const streamInput: LLM.StreamInput = {
+          user: {
+            id: MessageID.make("msg_user-compaction-replay"),
+            sessionID,
+            role: "user",
+            time: { created: Date.now() },
+            agent: agent.name,
+            model: { providerID: ProviderV2.ID.openai, modelID: resolved.id },
+          },
+          sessionID,
+          model: resolved,
+          agent,
+          system: ["You are a helpful assistant."],
+          messages: [
+            { role: "user", content: OpenAICompaction.COMPACTION_PROMPT },
+            {
+              role: "assistant",
+              content: [
+                { type: "text", text: "local " },
+                { type: "text", text: "summary\n" },
+              ],
+            },
+            { role: "user", content: "next" },
+          ],
+          openAICompaction,
+          tools: {},
+        }
+
+        yield* drain(streamInput)
+
+        const capture = yield* Effect.promise(() => request)
+        expect(capture.headers.has(OpenAICompaction.TOKEN_HEADER)).toBe(false)
+        if (!Array.isArray(capture.body.input)) throw new Error("Expected OpenAI Responses input")
+        expect(JSON.stringify(capture.body.input)).not.toContain(OpenAICompaction.COMPACTION_PROMPT)
+        expect(JSON.stringify(capture.body.input)).not.toContain('"text":"local "')
+        expect(JSON.stringify(capture.body.input)).not.toContain('"text":"summary\\n"')
+        expect(capture.body.input.filter((item) => item?.type === "compaction")).toEqual([canonical])
+
+        const fallbackRequest = waitRequest("/responses", createEventResponse(events, true))
+        const fallbackSessionID = SessionID.make("session-test-compaction-binding-fallback")
+        yield* drain({
+          ...streamInput,
+          sessionID: fallbackSessionID,
+          user: {
+            ...streamInput.user,
+            id: MessageID.make("msg_user-compaction-binding-fallback"),
+            sessionID: fallbackSessionID,
+          },
+          openAICompaction: {
+            ...openAICompaction,
+            state: { ...openAICompaction.state, credentialFingerprint: "stale-fingerprint" },
+          },
+        })
+        const fallback = yield* Effect.promise(() => fallbackRequest)
+        expect(fallback.headers.has(OpenAICompaction.TOKEN_HEADER)).toBe(false)
+        if (!Array.isArray(fallback.body.input)) throw new Error("Expected OpenAI Responses input")
+        expect(JSON.stringify(fallback.body.input)).toContain(OpenAICompaction.COMPACTION_PROMPT)
+        expect(JSON.stringify(fallback.body.input)).toContain('"text":"local "')
+        expect(JSON.stringify(fallback.body.input)).toContain('"text":"summary\\n"')
+        expect(fallback.body.input.filter((item) => item?.type === "compaction")).toEqual([])
       }),
     { config: () => openAIConfig(loadFixture("openai", "gpt-5.2").model, `${state.server!.url.origin}/v1`) },
   )

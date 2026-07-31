@@ -1292,6 +1292,7 @@ const layer = Layer.effect(
                 ...modelMsgs,
                 ...(isLastStep ? [{ role: "assistant" as const, content: MAX_STEPS_PROMPT }] : []),
               ],
+              openAICompaction: MessageV2.openAICompaction(msgs),
               tools,
               model,
               toolChoice: format.type === "json_schema" ? "required" : undefined,

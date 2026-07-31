@@ -7,6 +7,7 @@ import { APICallError } from "ai"
 import { ProviderError } from "../../src/provider/error"
 import { OpenAIWebSocket } from "../../src/plugin/openai/ws"
 import { OpenAIWebSocketPool, TITLE_HEADER } from "../../src/plugin/openai/ws-pool"
+import { OpenAICompaction } from "../../src/provider/openai-compaction"
 
 describe("plugin.openai.ws", () => {
   test("derives websocket URLs and sends auth plus protocol headers", async () => {
@@ -623,7 +624,7 @@ describe("plugin.openai.ws-pool", () => {
     fetch.close()
   })
 
-  test("falls back to HTTP for missing session and title requests", async () => {
+  test("falls back to HTTP for missing session, title, and compaction replay requests", async () => {
     await using server = await createWebSocketServer(() => {})
     const fetch = OpenAIWebSocketPool.createWebSocketFetch()
 
@@ -633,12 +634,15 @@ describe("plugin.openai.ws-pool", () => {
       body: JSON.stringify({ stream: true }),
     })
     const title = await fetch(server.url, streamRequest({ [TITLE_HEADER]: "true" }))
+    const compaction = await fetch(server.url, streamRequest({ [OpenAICompaction.HTTP_HEADER]: "true" }))
 
     expect(await missingSession.text()).toBe("http")
     expect(await title.text()).toBe("http")
-    expect(server.httpRequests).toHaveLength(2)
+    expect(await compaction.text()).toBe("http")
+    expect(server.httpRequests).toHaveLength(3)
     expect(server.httpRequests[0]?.headers[TITLE_HEADER]).toBeUndefined()
     expect(server.httpRequests[1]?.headers[TITLE_HEADER]).toBeUndefined()
+    expect(server.httpRequests[2]?.headers[OpenAICompaction.HTTP_HEADER]).toBeUndefined()
     fetch.close()
   })
 

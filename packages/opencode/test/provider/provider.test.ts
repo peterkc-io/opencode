@@ -407,6 +407,28 @@ it.instance(
 )
 
 it.instance(
+  "resolves environment variables in provider base URLs",
+  Effect.gen(function* () {
+    yield* set("TEST_PROVIDER_HOST", "api.resolved.test")
+    const model = yield* Provider.use.getModel(ProviderV2.ID.make("custom-openai-env"), ModelV2.ID.make("gpt-4"))
+    expect(yield* Provider.use.getBaseURL(model)).toBe("https://api.resolved.test/v1")
+  }),
+  {
+    config: {
+      provider: {
+        "custom-openai-env": {
+          name: "Custom OpenAI",
+          npm: "@ai-sdk/openai-compatible",
+          env: [],
+          models: { "gpt-4": { name: "GPT-4", tool_call: true, limit: { context: 128000, output: 4096 } } },
+          options: { apiKey: "test-key", baseURL: "https://${TEST_PROVIDER_HOST}/v1" },
+        },
+      },
+    },
+  },
+)
+
+it.instance(
   "model cost defaults to zero when not specified",
   Effect.gen(function* () {
     const providers = yield* list
@@ -1838,9 +1860,10 @@ it.instance("Google Vertex: uses REP endpoint for Claude continental multi-regio
       ModelV2.ID.make("claude-sonnet-4-6@default"),
     )
     const language = yield* provider.getLanguage(model)
-    expect(languageBaseURL(language)).toBe(
-      "https://aiplatform.eu.rep.googleapis.com/v1/projects/test-project/locations/eu/publishers/anthropic/models",
-    )
+    const expected =
+      "https://aiplatform.eu.rep.googleapis.com/v1/projects/test-project/locations/eu/publishers/anthropic/models"
+    expect(languageBaseURL(language)).toBe(expected)
+    expect(yield* provider.getBaseURL(model)).toBe(expected)
   }),
 )
 

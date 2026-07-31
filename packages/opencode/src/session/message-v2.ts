@@ -29,6 +29,7 @@ import { lt } from "drizzle-orm"
 import { or } from "drizzle-orm"
 import { MessageTable, PartTable, SessionTable } from "@opencode-ai/core/session/sql"
 import { ProviderError } from "@/provider/error"
+import { OpenAICompaction } from "@/provider/openai-compaction"
 import { iife } from "@/util/iife"
 import { errorMessage } from "@/util/error"
 import { isMedia } from "@/util/media"
@@ -228,7 +229,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
         if (part.type === "compaction") {
           userMessage.parts.push({
             type: "text",
-            text: "What did we do so far?",
+            text: OpenAICompaction.COMPACTION_PROMPT,
           })
         }
         if (part.type === "subtask") {
@@ -569,6 +570,43 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
     ]
   }
   return result
+}
+
+export function openAICompaction(msgs: WithParts[]) {
+  const boundaries = new Map<MessageID, WithParts>()
+  for (const msg of msgs) {
+    if (msg.info.role === "user" && msg.parts.some((part) => part.type === "compaction")) {
+      boundaries.set(msg.info.id, msg)
+    }
+  }
+  const completed = msgs.flatMap((summary) => {
+    if (summary.info.role !== "assistant" || !summary.info.summary || !summary.info.finish || summary.info.error)
+      return []
+    const boundary = boundaries.get(summary.info.parentID)
+    return boundary ? [{ boundary, summary }] : []
+  })
+  const latest = completed
+    .sort(
+      (a, b) =>
+        a.boundary.info.time.created - b.boundary.info.time.created ||
+        a.boundary.info.id.localeCompare(b.boundary.info.id) ||
+        a.summary.info.time.created - b.summary.info.time.created ||
+        a.summary.info.id.localeCompare(b.summary.info.id),
+    )
+    .at(-1)
+  if (!latest) return undefined
+
+  const selected = latest.boundary.parts
+    .flatMap((part) => (part.type === "compaction" && part.openai ? [{ id: part.id, state: part.openai }] : []))
+    .sort((a, b) => a.state.time - b.state.time || a.id.localeCompare(b.id))
+    .at(-1)
+  if (selected?.state.status !== "success") return undefined
+
+  const text = OpenAICompaction.summaryText(
+    latest.summary.parts.filter((item): item is SessionV1.TextPart => item.type === "text").map((item) => item.text),
+  )
+  if (!text) return undefined
+  return { state: selected.state, summary: text }
 }
 
 export const filterCompactedEffect = Effect.fnUntraced(function* (sessionID: SessionID) {

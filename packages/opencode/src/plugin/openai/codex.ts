@@ -411,8 +411,9 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
               requestInput instanceof URL
                 ? requestInput
                 : new URL(typeof requestInput === "string" ? requestInput : requestInput.url)
-            const url =
-              parsed.pathname.includes("/v1/responses") || parsed.pathname.includes("/chat/completions")
+            const url = parsed.pathname.endsWith("/responses/compact")
+              ? new URL(`${codexApiEndpoint.replace(/\/+$/, "")}/compact`)
+              : parsed.pathname.includes("/v1/responses") || parsed.pathname.includes("/chat/completions")
                 ? new URL(codexApiEndpoint)
                 : parsed
 

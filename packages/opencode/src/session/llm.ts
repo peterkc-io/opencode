@@ -29,6 +29,7 @@ import * as OtelTracer from "@effect/opentelemetry/Tracer"
 import { LLMAISDK } from "./llm/ai-sdk"
 import { LLMNativeRuntime } from "./llm/native-runtime"
 import { LLMRequestPrep } from "./llm/request"
+import { OpenAICompaction } from "@/provider/openai-compaction"
 
 export const OUTPUT_TOKEN_MAX = ProviderTransform.OUTPUT_TOKEN_MAX
 
@@ -43,6 +44,10 @@ export type StreamInput = {
   messages: ModelMessage[]
   small?: boolean
   tools: Record<string, Tool>
+  openAICompaction?: {
+    state: SessionV1.OpenAICompactionSuccess
+    summary: string
+  }
   retries?: number
   toolChoice?: "auto" | "required" | "none"
 }
@@ -103,6 +108,7 @@ const live: Layer.Layer<
       )
 
       const isWorkflow = language instanceof GitLabWorkflowLanguageModel
+      const openAICompaction = input.openAICompaction
       const prepared = yield* LLMRequestPrep.prepare({
         ...input,
         provider: item,
@@ -241,6 +247,13 @@ const live: Layer.Layer<
           abort: input.abort,
         })
         if (native.type === "supported") {
+          if (openAICompaction) {
+            yield* Effect.logInfo("OpenAI remote compaction unavailable for native runtime; using local summary", {
+              "session.id": input.sessionID,
+              providerID: input.model.providerID,
+              modelID: input.model.id,
+            })
+          }
           yield* Effect.logInfo("llm runtime selected", {
             "llm.runtime": "native",
             "llm.provider": input.model.providerID,
@@ -268,6 +281,46 @@ const live: Layer.Layer<
         })
       }
 
+      const compactionToken = openAICompaction
+        ? yield* Effect.gen(function* () {
+            const resolvedBaseURL = yield* provider.getBaseURL(input.model)
+            if (
+              !OpenAICompaction.matches({
+                state: openAICompaction.state,
+                model: input.model,
+                provider: item,
+                auth: info,
+                baseURL: OpenAICompaction.baseURL(resolvedBaseURL),
+              })
+            ) {
+              yield* Effect.logWarning("OpenAI remote compaction binding changed; using local summary", {
+                "session.id": input.sessionID,
+                providerID: input.model.providerID,
+                modelID: input.model.id,
+              })
+              return undefined
+            }
+            return yield* Effect.acquireRelease(
+              Effect.sync(() =>
+                OpenAICompaction.register({
+                  ...openAICompaction,
+                  oauth: info?.type === "oauth",
+                }),
+              ),
+              (token) =>
+                Effect.sync(() => OpenAICompaction.release(token)).pipe(
+                  Effect.flatMap((failure) =>
+                    failure
+                      ? Effect.logWarning("OpenAI remote compaction replay skipped; using local summary", {
+                          "session.id": input.sessionID,
+                          failure,
+                        })
+                      : Effect.void,
+                  ),
+                ),
+            )
+          })
+        : undefined
       yield* Effect.logInfo("llm runtime selected", {
         "llm.runtime": "ai-sdk",
         "llm.provider": input.model.providerID,
@@ -319,7 +372,10 @@ const live: Layer.Layer<
           toolChoice: input.toolChoice,
           maxOutputTokens: prepared.params.maxOutputTokens,
           abortSignal: input.abort,
-          headers: prepared.headers,
+          headers: {
+            ...prepared.headers,
+            ...(compactionToken ? { [OpenAICompaction.TOKEN_HEADER]: compactionToken } : {}),
+          },
           maxRetries: input.retries ?? 0,
           messages: prepared.messages,
           model: wrapLanguageModel({

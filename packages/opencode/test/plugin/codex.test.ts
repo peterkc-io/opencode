@@ -192,6 +192,45 @@ describe("plugin.codex", () => {
     )
   })
 
+  test("routes compact requests to the Codex compact endpoint", async () => {
+    let path = ""
+    let authorization = ""
+    let accountID = ""
+    using server = Bun.serve({
+      port: 0,
+      fetch(request) {
+        const url = new URL(request.url)
+        path = url.pathname
+        authorization = request.headers.get("authorization") ?? ""
+        accountID = request.headers.get("ChatGPT-Account-Id") ?? ""
+        return Response.json({ id: "resp_1", output: [] })
+      },
+    })
+    const hooks = await CodexAuthPlugin({} as never, {
+      codexApiEndpoint: new URL("/backend-api/codex/responses", server.url).toString(),
+    })
+    const loaded = await hooks.auth!.loader!(
+      async () =>
+        ({
+          type: "oauth",
+          refresh: "refresh",
+          access: "access",
+          expires: Date.now() + 60_000,
+          accountId: "acc-123",
+        }) as never,
+      {} as never,
+    )
+
+    await loaded.fetch!("https://api.openai.com/v1/responses/compact", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-5.6", input: [] }),
+    })
+
+    expect(path).toBe("/backend-api/codex/responses/compact")
+    expect(authorization).toBe("Bearer access")
+    expect(accountID).toBe("acc-123")
+  })
+
   test("deduplicates concurrent Codex token refreshes", async () => {
     let auth = {
       type: "oauth" as const,

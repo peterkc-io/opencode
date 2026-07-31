@@ -1659,4 +1659,173 @@ describe("session.message-v2.latest", () => {
     expect(state.tasks).toHaveLength(1)
     expect(state.tasks[0]).toMatchObject({ type: "compaction", auto: true })
   })
+
+  test("recovers remote compaction only with its completed local summary", () => {
+    const remote = {
+      status: "success",
+      responseID: "resp_1",
+      providerID: ProviderV2.ID.make("openai"),
+      modelID: ModelV2.ID.make("gpt-5.6"),
+      apiModelID: "gpt-5.6",
+      baseURL: "https://api.openai.com/v1",
+      authType: "api",
+      credentialSalt: "salt",
+      credentialFingerprint: "fingerprint",
+      output: [{ id: "cmp_1", type: "compaction", encrypted_content: "encrypted" }],
+      time: 1,
+    } as SessionV1.OpenAICompactionSuccess
+    const user: SessionV1.WithParts = {
+      info: userInfo(COMPACTION_USER),
+      parts: [
+        {
+          ...basePart(COMPACTION_USER, "remote"),
+          type: "compaction",
+          auto: false,
+          openai: remote,
+        },
+      ],
+    }
+    const summary: SessionV1.WithParts = {
+      info: {
+        ...assistantInfo(SUMMARY_ASSISTANT, COMPACTION_USER),
+        summary: true,
+        finish: "stop",
+      } as SessionV1.Assistant,
+      parts: [{ ...basePart(SUMMARY_ASSISTANT, "summary"), type: "text", text: "local summary" }],
+    }
+
+    expect(MessageV2.openAICompaction([user, summary])).toEqual({ state: remote, summary: "local summary" })
+    const newerRemote = { ...remote, responseID: "resp_2", time: 2 }
+    const retried: SessionV1.WithParts = {
+      ...user,
+      parts: [
+        { ...user.parts[0]!, id: PartID.ascending(), openai: newerRemote } as SessionV1.CompactionPart,
+        ...user.parts,
+      ],
+    }
+    const inverse: SessionV1.WithParts = { ...retried, parts: retried.parts.toReversed() }
+    expect(MessageV2.openAICompaction([retried, summary])).toEqual({ state: newerRemote, summary: "local summary" })
+    expect(MessageV2.openAICompaction([inverse, summary])).toEqual({ state: newerRemote, summary: "local summary" })
+    const newestFallback: SessionV1.WithParts = {
+      ...retried,
+      parts: [
+        ...retried.parts,
+        {
+          ...user.parts[0]!,
+          id: PartID.ascending(),
+          openai: { status: "fallback", reason: "network_error", time: 3 },
+        } as SessionV1.CompactionPart,
+      ],
+    }
+    expect(MessageV2.openAICompaction([newestFallback, summary])).toBeUndefined()
+    const retryID = MessageID.ascending()
+    const retry: SessionV1.WithParts = {
+      info: { ...summary.info, id: retryID } as SessionV1.Assistant,
+      parts: [{ ...basePart(retryID, "retry"), type: "text", text: "latest summary" }],
+    }
+    expect(MessageV2.openAICompaction([user, summary, retry])).toEqual({
+      state: remote,
+      summary: "latest summary",
+    })
+    const incompleteID = MessageID.ascending()
+    const incomplete: SessionV1.WithParts = {
+      info: userInfo(incompleteID),
+      parts: [
+        {
+          ...basePart(incompleteID, "incomplete"),
+          type: "compaction",
+          auto: false,
+        },
+      ],
+    }
+    expect(MessageV2.openAICompaction([user, summary, incomplete])).toEqual({
+      state: remote,
+      summary: "local summary",
+    })
+
+    const wrappedOldID = MessageID.make("msg_ffffffffffff_old")
+    const wrappedNewID = MessageID.make("msg_000000000000_new")
+    const wrappedOldSummaryID = MessageID.make("msg_ffffffffffff_summary")
+    const wrappedNewSummaryID = MessageID.make("msg_000000000000_summary")
+    const wrappedOld: SessionV1.WithParts = {
+      info: { ...user.info, id: wrappedOldID, time: { created: 1 } },
+      parts: [
+        {
+          ...user.parts[0]!,
+          id: PartID.ascending(),
+          messageID: wrappedOldID,
+          openai: remote,
+        } as SessionV1.CompactionPart,
+      ],
+    }
+    const wrappedNew: SessionV1.WithParts = {
+      info: { ...user.info, id: wrappedNewID, time: { created: 3 } },
+      parts: [
+        {
+          ...user.parts[0]!,
+          id: PartID.ascending(),
+          messageID: wrappedNewID,
+          openai: newerRemote,
+        } as SessionV1.CompactionPart,
+      ],
+    }
+    const wrappedOldSummary: SessionV1.WithParts = {
+      info: {
+        ...summary.info,
+        id: wrappedOldSummaryID,
+        parentID: wrappedOldID,
+        time: { created: 2 },
+      } as SessionV1.Assistant,
+      parts: [{ ...basePart(wrappedOldSummaryID, "wrapped-old"), type: "text", text: "older summary" }],
+    }
+    const wrappedNewSummary: SessionV1.WithParts = {
+      info: {
+        ...summary.info,
+        id: wrappedNewSummaryID,
+        parentID: wrappedNewID,
+        time: { created: 4 },
+      } as SessionV1.Assistant,
+      parts: [{ ...basePart(wrappedNewSummaryID, "wrapped-new"), type: "text", text: "newer summary" }],
+    }
+    expect(MessageV2.openAICompaction([wrappedNew, wrappedNewSummary, wrappedOld, wrappedOldSummary])).toEqual({
+      state: newerRemote,
+      summary: "newer summary",
+    })
+
+    const unfinished: SessionV1.WithParts = {
+      ...summary,
+      info: { ...assistantInfo(SUMMARY_ASSISTANT, COMPACTION_USER), summary: true },
+    }
+    expect(MessageV2.openAICompaction([user, unfinished])).toBeUndefined()
+    const errored: SessionV1.WithParts = {
+      ...summary,
+      info: {
+        ...assistantInfo(
+          SUMMARY_ASSISTANT,
+          COMPACTION_USER,
+          new SessionV1.AuthError({ providerID: "openai", message: "expired" }).toObject(),
+        ),
+        summary: true,
+        finish: "stop",
+      },
+    }
+    expect(MessageV2.openAICompaction([user, errored])).toBeUndefined()
+    const fallback: SessionV1.WithParts = {
+      ...user,
+      parts: [
+        {
+          ...basePart(COMPACTION_USER, "fallback"),
+          type: "compaction",
+          auto: false,
+          openai: { status: "fallback", reason: "network_error", time: 1 },
+        },
+      ],
+    }
+    expect(MessageV2.openAICompaction([fallback, summary])).toBeUndefined()
+    const empty: SessionV1.WithParts = {
+      ...summary,
+      parts: [{ ...basePart(SUMMARY_ASSISTANT, "empty"), type: "text", text: "  " }],
+    }
+    expect(MessageV2.openAICompaction([user, empty])).toBeUndefined()
+  })
 })

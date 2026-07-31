@@ -17,10 +17,19 @@ export type Replay = {
 }
 
 type ActiveReplay = Replay & {
+  registeredAt: number
   failure?: "invalid_request" | "boundary_not_found"
 }
 
 const active = new Map<string, ActiveReplay>()
+const MAX_ACTIVE_AGE_MS = 5 * 60 * 1000
+
+function sweep() {
+  const cutoff = Date.now() - MAX_ACTIVE_AGE_MS
+  for (const [token, replay] of active) {
+    if (replay.registeredAt < cutoff) active.delete(token)
+  }
+}
 
 function isRecord(value: unknown): value is JsonObject {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -136,8 +145,9 @@ export function replayInput(input: unknown, replay: Replay) {
 }
 
 export function register(replay: Replay) {
+  sweep()
   const token = crypto.randomUUID()
-  active.set(token, { ...replay })
+  active.set(token, { ...replay, registeredAt: Date.now() })
   return token
 }
 

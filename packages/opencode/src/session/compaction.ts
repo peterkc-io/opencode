@@ -312,7 +312,8 @@ const layer = Layer.effect(
       const prepared = yield* client
         .prepare<OpenAIResponses.OpenAIResponsesBody>(request)
         .pipe(Effect.catch(() => Effect.succeed(undefined)))
-      const body = OpenAICompaction.compactBody(prepared?.body)
+      if (!prepared) return fallback("internal_error")
+      const body = OpenAICompaction.compactBody(prepared.body)
       if (!body) return fallback("invalid_response")
       if (credentials?.type !== "oauth") delete body.service_tier
 
@@ -385,7 +386,10 @@ const layer = Layer.effect(
         catch: () => undefined,
       }).pipe(Effect.catch(() => Effect.succeed(undefined)))
       if (!response) return fallback("network_error")
-      if (!response.ok) return fallback("http_error", response.status)
+      if (!response.ok) {
+        yield* Effect.promise(() => response.body?.cancel() ?? Promise.resolve()).pipe(Effect.ignore)
+        return fallback("http_error", response.status)
+      }
       const payload = yield* Effect.tryPromise({
         try: () => response.json(),
         catch: () => undefined,
@@ -507,25 +511,14 @@ const layer = Layer.effect(
           (yield* provider.getModel(userMessage.model.providerID, userMessage.model.modelID).pipe(Effect.orDie)))
       const cfg = yield* config.get()
       const history = compactionPart && messages.at(-1)?.info.id === input.parentID ? messages.slice(0, -1) : messages
-      const remoteState =
+      const remoteInput =
         compactionPart && remoteModel?.api.npm === "@ai-sdk/openai"
-          ? yield* remote({
+          ? {
               messages: history,
               sessionID: input.sessionID,
               user: userMessage,
               model: remoteModel,
-            }).pipe(
-              Effect.catchCause((cause) =>
-                Cause.hasInterrupts(cause)
-                  ? Effect.failCause(cause)
-                  : Effect.succeed({
-                      status: "fallback" as const,
-                      reason: "internal_error" as const,
-                      statusCode: undefined,
-                      time: Date.now(),
-                    }),
-              ),
-            )
+            }
           : undefined
       const prior = completedCompactions(history)
       const hidden = new Set(prior.flatMap((item) => [item.userIndex, item.assistantIndex]))
@@ -607,6 +600,22 @@ const layer = Layer.effect(
         yield* session.updateMessage(processor.message)
         return "stop"
       }
+
+      if (processor.message.error) return "stop"
+      const remoteState = remoteInput
+        ? yield* remote(remoteInput).pipe(
+            Effect.catchCause((cause) =>
+              Cause.hasInterrupts(cause)
+                ? Effect.failCause(cause)
+                : Effect.succeed({
+                    status: "fallback" as const,
+                    reason: "internal_error" as const,
+                    statusCode: undefined,
+                    time: Date.now(),
+                  }),
+            ),
+          )
+        : undefined
 
       if (
         compactionPart &&
@@ -710,7 +719,6 @@ const layer = Layer.effect(
         }
       }
 
-      if (processor.message.error) return "stop"
       if (result === "continue") {
         yield* events.publish(Event.Compacted, { sessionID: input.sessionID })
       }

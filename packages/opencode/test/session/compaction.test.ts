@@ -898,6 +898,38 @@ describe("session.compaction.process", () => {
             output: canonical,
           },
         })
+
+        const completed = (yield* ssn.messages({ sessionID: session.id })).at(-1)
+        if (!completed || completed.info.role !== "assistant") {
+          return yield* Effect.die("Missing completed local summary")
+        }
+        yield* ssn.updateMessage({ ...completed.info, finish: "stop" })
+        yield* ssn.updatePart({
+          id: PartID.ascending(),
+          messageID: completed.info.id,
+          sessionID: session.id,
+          type: "text",
+          text: "local summary",
+          time: { start: Date.now(), end: Date.now() },
+        })
+        yield* createUserMessage(session.id, "after compaction", modelRef)
+        yield* createSummaryCompaction(session.id, modelRef)
+        const nextMessages = yield* ssn.messages({ sessionID: session.id })
+        const nextParentID = nextMessages.at(-1)?.info.id
+        if (!nextParentID) return yield* Effect.die("Missing repeated compaction parent")
+        expect(
+          yield* SessionCompaction.use.process({
+            parentID: nextParentID,
+            messages: yield* MessageV2.filterCompactedEffect(session.id),
+            sessionID: session.id,
+            auto: false,
+          }),
+        ).toBe("continue")
+        expect(requests).toHaveLength(2)
+        const replayed = requests[1]?.body.input
+        if (!Array.isArray(replayed)) return yield* Effect.die("Missing repeated compact input")
+        expect(replayed).toEqual(expect.arrayContaining(canonical))
+        expect(JSON.stringify(replayed)).not.toContain("local summary")
       }).pipe(withCompaction({ provider }))
     },
     { git: true },
@@ -952,6 +984,7 @@ describe("session.compaction.process", () => {
     "records sanitized HTTP and timeout fallbacks",
     () => {
       let requests = 0
+      let rejectedResponse: Response | undefined
       const model = ProviderTest.model({
         id: ModelV2.ID.make("gpt-5.6"),
         providerID: ProviderV2.ID.make("openai"),
@@ -966,7 +999,10 @@ describe("session.compaction.process", () => {
               timeout: 5,
               fetch: async (_input: RequestInfo | URL, init?: RequestInit) => {
                 requests += 1
-                if (requests === 1) return new Response("secret response body", { status: 429 })
+                if (requests === 1) {
+                  rejectedResponse = new Response("secret response body", { status: 429 })
+                  return rejectedResponse
+                }
                 if (!init?.signal) throw new Error("Expected compact request signal")
                 return new Promise<Response>((_resolve, reject) => {
                   if (init.signal?.aborted) return reject(init.signal.reason)
@@ -999,6 +1035,7 @@ describe("session.compaction.process", () => {
           statusCode: 429,
           time: expect.any(Number),
         })
+        expect(rejectedResponse?.bodyUsed).toBe(true)
 
         const timedOut = yield* ssn.create({})
         expect((yield* compact(timedOut.id))?.openai).toEqual({

@@ -138,6 +138,36 @@ describe("OpenAICompaction", () => {
     expect(OpenAICompaction.compactBody({ model: "gpt-5.6", input: [] })).toBeUndefined()
   })
 
+  test("rewrites Request inputs and validates configured fetch helpers", async () => {
+    let captured: RequestInit | undefined
+    const token = OpenAICompaction.register({ state, summary: "local summary", oauth: false })
+    const wrapped = OpenAICompaction.wrapFetch(async (_input, init) => {
+      captured = init
+      return new Response("{}")
+    })
+    await wrapped(
+      new Request("https://api.openai.com/v1/responses", {
+        method: "POST",
+        headers: { [OpenAICompaction.TOKEN_HEADER]: token },
+        body: JSON.stringify({ model: "gpt-5.6", input }),
+      }),
+    )
+    if (typeof captured?.body !== "string") throw new Error("Expected rewritten request body")
+    expect(JSON.parse(captured.body).input).toEqual([input[0], ...canonical, input[3]])
+    expect(OpenAICompaction.release(token)).toBeUndefined()
+    expect(OpenAICompaction.headers({ authorization: "Bearer test", ignored: 1 })).toEqual({
+      authorization: "Bearer test",
+    })
+    expect(OpenAICompaction.fetcher(undefined)).toBeUndefined()
+    const valid = OpenAICompaction.fetcher(async () => new Response("ok"))
+    const invalid = OpenAICompaction.fetcher(async () => ({}))
+    if (!valid || !invalid) throw new Error("Expected configured fetch wrappers")
+    expect(await valid("https://api.openai.com/v1/responses")).toBeInstanceOf(Response)
+    await expect(invalid("https://api.openai.com/v1/responses")).rejects.toThrow(
+      "Configured OpenAI fetch did not return a Response",
+    )
+  })
+
   test("keeps the local summary when the boundary cannot be found", async () => {
     let captured: RequestInit | undefined
     const token = OpenAICompaction.register({ state, summary: "missing", oauth: false })

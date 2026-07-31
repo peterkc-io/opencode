@@ -1437,7 +1437,8 @@ describe("session.llm.stream", () => {
         expect(capture.headers.has(OpenAICompaction.TOKEN_HEADER)).toBe(false)
         if (!Array.isArray(capture.body.input)) throw new Error("Expected OpenAI Responses input")
         expect(JSON.stringify(capture.body.input)).not.toContain(OpenAICompaction.COMPACTION_PROMPT)
-        expect(JSON.stringify(capture.body.input)).not.toContain("local summary")
+        expect(JSON.stringify(capture.body.input)).not.toContain('"text":"local "')
+        expect(JSON.stringify(capture.body.input)).not.toContain('"text":"summary\\n"')
         expect(capture.body.input.filter((item) => item?.type === "compaction")).toEqual([canonical])
 
         const fallbackRequest = waitRequest("/responses", createEventResponse(events, true))

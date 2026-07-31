@@ -192,12 +192,42 @@ export const AgentPart = Schema.Struct({
 }).annotate({ identifier: "AgentPart" })
 export type AgentPart = Types.DeepMutable<Schema.Schema.Type<typeof AgentPart>>
 
+export const OpenAICompactionSuccess = Schema.Struct({
+  status: Schema.Literal("success"),
+  responseID: Schema.String,
+  providerID: Provider.ID,
+  modelID: Model.ID,
+  apiModelID: Schema.String,
+  baseURL: Schema.String,
+  authType: Schema.Literals(["api", "oauth"]),
+  credentialSalt: Schema.String,
+  credentialFingerprint: Schema.String,
+  output: Schema.Array(Schema.Record(Schema.String, Schema.Any)),
+  time: NonNegativeInt,
+}).annotate({ identifier: "OpenAICompactionSuccess" })
+export type OpenAICompactionSuccess = Types.DeepMutable<Schema.Schema.Type<typeof OpenAICompactionSuccess>>
+
+export const OpenAICompactionFallback = Schema.Struct({
+  status: Schema.Literal("fallback"),
+  reason: Schema.Literals(["http_error", "network_error", "invalid_response", "unsupported_auth"]),
+  statusCode: Schema.optional(NonNegativeInt),
+  time: NonNegativeInt,
+}).annotate({ identifier: "OpenAICompactionFallback" })
+export type OpenAICompactionFallback = Types.DeepMutable<Schema.Schema.Type<typeof OpenAICompactionFallback>>
+
+export const OpenAICompactionState = Schema.Union([OpenAICompactionSuccess, OpenAICompactionFallback]).annotate({
+  discriminator: "status",
+  identifier: "OpenAICompactionState",
+})
+export type OpenAICompactionState = Types.DeepMutable<Schema.Schema.Type<typeof OpenAICompactionState>>
+
 export const CompactionPart = Schema.Struct({
   ...partBase,
   type: Schema.Literal("compaction"),
   auto: Schema.Boolean,
   overflow: Schema.optional(Schema.Boolean),
   tail_start_id: Schema.optional(MessageID),
+  openai: Schema.optional(OpenAICompactionState),
 }).annotate({ identifier: "CompactionPart" })
 export type CompactionPart = Types.DeepMutable<Schema.Schema.Type<typeof CompactionPart>>
 

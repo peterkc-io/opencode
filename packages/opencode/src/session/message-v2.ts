@@ -29,6 +29,7 @@ import { lt } from "drizzle-orm"
 import { or } from "drizzle-orm"
 import { MessageTable, PartTable, SessionTable } from "@opencode-ai/core/session/sql"
 import { ProviderError } from "@/provider/error"
+import { OpenAICompaction } from "@/provider/openai-compaction"
 import { iife } from "@/util/iife"
 import { errorMessage } from "@/util/error"
 import { isMedia } from "@/util/media"
@@ -228,7 +229,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
         if (part.type === "compaction") {
           userMessage.parts.push({
             type: "text",
-            text: "What did we do so far?",
+            text: OpenAICompaction.COMPACTION_PROMPT,
           })
         }
         if (part.type === "subtask") {
@@ -569,6 +570,29 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
     ]
   }
   return result
+}
+
+export function openAICompaction(msgs: WithParts[]) {
+  const boundary = msgs.findLast(
+    (msg) => msg.info.role === "user" && msg.parts.some((part) => part.type === "compaction"),
+  )
+  if (!boundary || boundary.info.role !== "user") return undefined
+  const part = boundary.parts.find((item): item is CompactionPart => item.type === "compaction")
+  if (part?.openai?.status !== "success") return undefined
+  const summary = msgs.find(
+    (msg) =>
+      msg.info.role === "assistant" &&
+      msg.info.parentID === boundary.info.id &&
+      msg.info.summary === true &&
+      Boolean(msg.info.finish) &&
+      !msg.info.error,
+  )
+  if (!summary || summary.info.role !== "assistant") return undefined
+  const text = OpenAICompaction.summaryText(
+    summary.parts.filter((item): item is SessionV1.TextPart => item.type === "text").map((item) => item.text),
+  )
+  if (!text) return undefined
+  return { state: part.openai, summary: text }
 }
 
 export const filterCompactedEffect = Effect.fnUntraced(function* (sessionID: SessionID) {

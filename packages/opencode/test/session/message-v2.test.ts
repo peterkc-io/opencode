@@ -1659,4 +1659,46 @@ describe("session.message-v2.latest", () => {
     expect(state.tasks).toHaveLength(1)
     expect(state.tasks[0]).toMatchObject({ type: "compaction", auto: true })
   })
+
+  test("recovers remote compaction only with its completed local summary", () => {
+    const remote = {
+      status: "success",
+      responseID: "resp_1",
+      providerID: ProviderV2.ID.make("openai"),
+      modelID: ModelV2.ID.make("gpt-5.6"),
+      apiModelID: "gpt-5.6",
+      baseURL: "https://api.openai.com/v1",
+      authType: "api",
+      credentialSalt: "salt",
+      credentialFingerprint: "fingerprint",
+      output: [{ id: "cmp_1", type: "compaction", encrypted_content: "encrypted" }],
+      time: 1,
+    } as SessionV1.OpenAICompactionSuccess
+    const user: SessionV1.WithParts = {
+      info: userInfo(COMPACTION_USER),
+      parts: [
+        {
+          ...basePart(COMPACTION_USER, "remote"),
+          type: "compaction",
+          auto: false,
+          openai: remote,
+        },
+      ],
+    }
+    const summary: SessionV1.WithParts = {
+      info: {
+        ...assistantInfo(SUMMARY_ASSISTANT, COMPACTION_USER),
+        summary: true,
+        finish: "stop",
+      } as SessionV1.Assistant,
+      parts: [{ ...basePart(SUMMARY_ASSISTANT, "summary"), type: "text", text: "local summary" }],
+    }
+
+    expect(MessageV2.openAICompaction([user, summary])).toEqual({ state: remote, summary: "local summary" })
+    const unfinished: SessionV1.WithParts = {
+      ...summary,
+      info: { ...assistantInfo(SUMMARY_ASSISTANT, COMPACTION_USER), summary: true },
+    }
+    expect(MessageV2.openAICompaction([user, unfinished])).toBeUndefined()
+  })
 })

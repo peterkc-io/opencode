@@ -88,7 +88,11 @@ function createModel(opts: {
 
 const wide = () => ProviderTest.fake({ model: createModel({ context: 100_000, output: 32_000 }) })
 
-function createUserMessage(sessionID: SessionID, text: string) {
+function createUserMessage(
+  sessionID: SessionID,
+  text: string,
+  model: { providerID: ProviderV2.ID; modelID: ModelV2.ID } = ref,
+) {
   return Effect.gen(function* () {
     const ssn = yield* SessionNs.Service
     const msg = yield* ssn.updateMessage({
@@ -96,7 +100,7 @@ function createUserMessage(sessionID: SessionID, text: string) {
       role: "user",
       sessionID,
       agent: "build",
-      model: ref,
+      model,
       time: { created: Date.now() },
     })
     yield* ssn.updatePart({
@@ -278,8 +282,12 @@ function compactionProcessLayer(options?: CompactionProcessOptions) {
   ])
 }
 
-function createSummaryCompaction(sessionID: SessionID) {
-  return SessionCompaction.use.create({ sessionID, agent: "build", model: ref, auto: false })
+function createSummaryCompaction(
+  sessionID: SessionID,
+  model: { providerID: ProviderV2.ID; modelID: ModelV2.ID } = ref,
+  auto = false,
+) {
+  return SessionCompaction.use.create({ sessionID, agent: "build", model, auto })
 }
 
 function readCompactionPart(sessionID: SessionID) {
@@ -826,6 +834,230 @@ describe("session.compaction.process", () => {
         }
       }
     }),
+  )
+
+  itCompaction.instance(
+    "persists canonical OpenAI output after manual compaction",
+    () => {
+      const requests: Array<{ url: string; headers: Headers; body: Record<string, unknown> }> = []
+      const canonical = [
+        { type: "message", role: "user", content: [{ type: "input_text", text: "older" }] },
+        { id: "cmp_1", type: "compaction", encrypted_content: "encrypted" },
+      ]
+      const model = ProviderTest.model({
+        id: ModelV2.ID.make("gpt-5.6"),
+        providerID: ProviderV2.ID.make("openai"),
+        api: { id: "gpt-5.6", url: "https://api.openai.test/v1", npm: "@ai-sdk/openai" },
+      })
+      const info = ProviderTest.info(
+        {
+          options: {
+            apiKey: "sk-test",
+            fetch: async (input: RequestInfo | URL, init?: RequestInit) => {
+              if (typeof init?.body !== "string") throw new Error("Expected JSON request body")
+              requests.push({
+                url: input instanceof Request ? input.url : input.toString(),
+                headers: new Headers(init?.headers),
+                body: JSON.parse(init.body),
+              })
+              return Response.json({ id: "resp_1", output: canonical })
+            },
+          },
+        },
+        model,
+      )
+      const provider = ProviderTest.fake({ model, info })
+      const modelRef = { providerID: model.providerID, modelID: model.id }
+      return Effect.gen(function* () {
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        yield* createUserMessage(session.id, "history", modelRef)
+        yield* createSummaryCompaction(session.id, modelRef)
+        const msgs = yield* ssn.messages({ sessionID: session.id })
+        const parent = msgs.at(-1)?.info.id
+        expect(parent).toBeTruthy()
+
+        const result = yield* SessionCompaction.use.process({
+          parentID: parent!,
+          messages: msgs,
+          sessionID: session.id,
+          auto: false,
+        })
+
+        expect(result).toBe("continue")
+        expect(requests).toHaveLength(1)
+        expect(requests[0]?.url).toBe("https://api.openai.test/v1/responses/compact")
+        expect(requests[0]?.headers.get("authorization")).toBe("Bearer sk-test")
+        expect(requests[0]?.body.model).toBe("gpt-5.6")
+        expect(Array.isArray(requests[0]?.body.input)).toBe(true)
+        expect(yield* readCompactionPart(session.id)).toMatchObject({
+          openai: {
+            status: "success",
+            responseID: "resp_1",
+            modelID: model.id,
+            output: canonical,
+          },
+        })
+      }).pipe(withCompaction({ provider }))
+    },
+    { git: true },
+  )
+
+  itCompaction.instance(
+    "records visible local fallback for malformed OpenAI output",
+    () => {
+      const model = ProviderTest.model({
+        id: ModelV2.ID.make("gpt-5.6"),
+        providerID: ProviderV2.ID.make("openai"),
+        api: { id: "gpt-5.6", url: "https://api.openai.test/v1", npm: "@ai-sdk/openai" },
+      })
+      const provider = ProviderTest.fake({
+        model,
+        info: ProviderTest.info(
+          {
+            options: {
+              apiKey: "sk-test",
+              fetch: async () => Response.json({ id: "resp_1", output: [] }),
+            },
+          },
+          model,
+        ),
+      })
+      const modelRef = { providerID: model.providerID, modelID: model.id }
+      return Effect.gen(function* () {
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        yield* createUserMessage(session.id, "history", modelRef)
+        yield* createSummaryCompaction(session.id, modelRef)
+        const msgs = yield* ssn.messages({ sessionID: session.id })
+        const parent = msgs.at(-1)?.info.id
+
+        expect(
+          yield* SessionCompaction.use.process({
+            parentID: parent!,
+            messages: msgs,
+            sessionID: session.id,
+            auto: false,
+          }),
+        ).toBe("continue")
+        expect(yield* readCompactionPart(session.id)).toMatchObject({
+          openai: { status: "fallback", reason: "invalid_response" },
+        })
+      }).pipe(withCompaction({ provider }))
+    },
+    { git: true },
+  )
+
+  itCompaction.instance(
+    "records sanitized HTTP and timeout fallbacks",
+    () => {
+      let requests = 0
+      const model = ProviderTest.model({
+        id: ModelV2.ID.make("gpt-5.6"),
+        providerID: ProviderV2.ID.make("openai"),
+        api: { id: "gpt-5.6", url: "https://api.openai.test/v1", npm: "@ai-sdk/openai" },
+      })
+      const provider = ProviderTest.fake({
+        model,
+        info: ProviderTest.info(
+          {
+            options: {
+              apiKey: "sk-test",
+              headerTimeout: 5,
+              fetch: async (_input: RequestInfo | URL, init?: RequestInit) => {
+                requests += 1
+                if (requests === 1) return new Response("secret response body", { status: 429 })
+                if (!init?.signal) throw new Error("Expected compact request signal")
+                return new Promise<Response>((_resolve, reject) => {
+                  if (init.signal?.aborted) return reject(init.signal.reason)
+                  init.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true })
+                })
+              },
+            },
+          },
+          model,
+        ),
+      })
+      const modelRef = { providerID: model.providerID, modelID: model.id }
+      return Effect.gen(function* () {
+        const ssn = yield* SessionNs.Service
+        const compact = (sessionID: SessionID) =>
+          Effect.gen(function* () {
+            yield* createUserMessage(sessionID, "history", modelRef)
+            yield* createSummaryCompaction(sessionID, modelRef)
+            const msgs = yield* ssn.messages({ sessionID })
+            const parentID = msgs.at(-1)?.info.id
+            if (!parentID) return yield* Effect.die("Missing compaction parent")
+            yield* SessionCompaction.use.process({ parentID, messages: msgs, sessionID, auto: false })
+            return yield* readCompactionPart(sessionID)
+          })
+
+        const http = yield* ssn.create({})
+        expect((yield* compact(http.id))?.openai).toEqual({
+          status: "fallback",
+          reason: "http_error",
+          statusCode: 429,
+          time: expect.any(Number),
+        })
+
+        const timedOut = yield* ssn.create({})
+        expect((yield* compact(timedOut.id))?.openai).toEqual({
+          status: "fallback",
+          reason: "network_error",
+          statusCode: undefined,
+          time: expect.any(Number),
+        })
+      }).pipe(withCompaction({ provider }))
+    },
+    { git: true },
+  )
+
+  itCompaction.instance(
+    "keeps automatic compaction on the local path",
+    () => {
+      let requests = 0
+      const model = ProviderTest.model({
+        id: ModelV2.ID.make("gpt-5.6"),
+        providerID: ProviderV2.ID.make("openai"),
+        api: { id: "gpt-5.6", url: "https://api.openai.test/v1", npm: "@ai-sdk/openai" },
+      })
+      const provider = ProviderTest.fake({
+        model,
+        info: ProviderTest.info(
+          {
+            options: {
+              apiKey: "sk-test",
+              fetch: async () => {
+                requests += 1
+                return Response.json({})
+              },
+            },
+          },
+          model,
+        ),
+      })
+      const modelRef = { providerID: model.providerID, modelID: model.id }
+      return Effect.gen(function* () {
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        yield* createUserMessage(session.id, "history", modelRef)
+        yield* createSummaryCompaction(session.id, modelRef, true)
+        const msgs = yield* ssn.messages({ sessionID: session.id })
+        const parent = msgs.at(-1)?.info.id
+
+        expect(
+          yield* SessionCompaction.use.process({
+            parentID: parent!,
+            messages: msgs,
+            sessionID: session.id,
+            auto: true,
+          }),
+        ).toBe("continue")
+        expect(requests).toBe(0)
+        expect((yield* readCompactionPart(session.id))?.openai).toBeUndefined()
+      }).pipe(withCompaction({ provider }))
+    },
+    { git: true },
   )
 
   it.instance(

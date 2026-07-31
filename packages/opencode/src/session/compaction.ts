@@ -22,6 +22,14 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { buildPrompt } from "@opencode-ai/core/session/compaction"
 import { SessionCompactionEvent } from "@opencode-ai/schema/session-compaction-event"
+import { Auth } from "@/auth"
+import { ProviderTransform } from "@/provider/transform"
+import { OpenAICompaction } from "@/provider/openai-compaction"
+import { LLMNative } from "./llm/native-request"
+import { LLMClient } from "@opencode-ai/llm/route"
+import type { OpenAIResponses } from "@opencode-ai/llm/protocols"
+import { llmClient } from "@opencode-ai/core/effect/app-node-platform"
+import { mergeDeep } from "remeda"
 
 export const Event = SessionCompactionEvent
 
@@ -164,6 +172,8 @@ const layer = Layer.effect(
     const provider = yield* Provider.Service
     const events = yield* EventV2Bridge.Service
     const flags = yield* RuntimeFlags.Service
+    const auth = yield* Auth.Service
+    const client = yield* LLMClient.Service
 
     const isOverflow = Effect.fn("SessionCompaction.isOverflow")(function* (input: {
       tokens: SessionV1.Assistant["tokens"]
@@ -236,6 +246,149 @@ const layer = Layer.effect(
         head: input.messages.slice(0, keep.start),
         tail_start_id: keep.id,
       }
+    })
+
+    const remote = Effect.fn("SessionCompaction.remote")(function* (input: {
+      messages: SessionV1.WithParts[]
+      sessionID: SessionID
+      user: SessionV1.User
+      model: Provider.Model
+    }) {
+      const attemptedAt = Date.now()
+      const fallback = (
+        reason: SessionV1.OpenAICompactionFallback["reason"],
+        statusCode?: number,
+      ): SessionV1.OpenAICompactionFallback => ({
+        status: "fallback",
+        reason,
+        statusCode,
+        time: attemptedAt,
+      })
+      const info = yield* provider.getProvider(input.model.providerID)
+      const credentials = yield* auth.get(input.model.providerID).pipe(Effect.catch(() => Effect.succeed(undefined)))
+      const credentialSalt = crypto.randomUUID()
+      const fingerprint = OpenAICompaction.credentialFingerprint(info, credentials, credentialSalt)
+      const apiKey = OpenAICompaction.apiKey(info, credentials)
+      if (!fingerprint || (credentials?.type === "oauth" && !credentials.accountId)) {
+        return fallback("unsupported_auth")
+      }
+
+      const baseURL = OpenAICompaction.baseURL(info, input.model)
+      const responsesURL = (() => {
+        try {
+          return new URL(baseURL)
+        } catch {
+          return undefined
+        }
+      })()
+      if (!responsesURL) return fallback("invalid_response")
+      responsesURL.pathname = `${responsesURL.pathname.replace(/\/+$/, "")}/responses`
+      const query = info.options.queryParams
+      if (query && typeof query === "object") {
+        for (const [key, value] of Object.entries(query)) {
+          if (typeof value === "string") responsesURL.searchParams.set(key, value)
+        }
+      }
+      const endpoint = OpenAICompaction.compactURL(responsesURL.toString())
+      if (!endpoint) return fallback("invalid_response")
+
+      const base = ProviderTransform.options({
+        model: input.model,
+        sessionID: input.sessionID,
+        providerOptions: info.options,
+      })
+      const variant =
+        input.user.model.variant && input.model.variants ? input.model.variants[input.user.model.variant] : undefined
+      const options = mergeDeep(mergeDeep(base, input.model.options), variant ?? {}) as Record<string, any>
+      const messages = yield* MessageV2.toModelMessagesEffect(input.messages, input.model)
+      const transformed = ProviderTransform.message(messages, input.model, options)
+      const request = LLMNative.request({
+        model: input.model,
+        apiKey,
+        baseURL,
+        messages: transformed,
+        providerOptions: ProviderTransform.providerOptions(input.model, options),
+      })
+      const prepared = yield* client
+        .prepare<OpenAIResponses.OpenAIResponsesBody>(request)
+        .pipe(Effect.catch(() => Effect.succeed(undefined)))
+      const body = OpenAICompaction.compactBody(prepared?.body)
+      if (!body) return fallback("invalid_response")
+      if (credentials?.type !== "oauth") delete body.service_tier
+
+      const previous = MessageV2.openAICompaction(input.messages)
+      if (
+        previous &&
+        OpenAICompaction.matches({
+          state: previous.state,
+          model: input.model,
+          provider: info,
+          auth: credentials,
+        })
+      ) {
+        const replayed = OpenAICompaction.replayInput(body.input, {
+          ...previous,
+          oauth: credentials?.type === "oauth",
+        })
+        if (replayed) body.input = replayed
+      }
+
+      const hook = yield* plugin.trigger(
+        "chat.headers",
+        {
+          sessionID: input.sessionID,
+          agent: input.user.agent,
+          model: input.model,
+          provider: info,
+          message: input.user,
+        },
+        { headers: {} as Record<string, string> },
+      )
+      const headers = new Headers({
+        ...OpenAICompaction.headers(info.options.headers),
+        ...input.model.headers,
+        ...hook.headers,
+        "content-type": "application/json",
+      })
+      if (credentials?.type !== "oauth" && apiKey && !headers.has("authorization")) {
+        headers.set("authorization", `Bearer ${apiKey}`)
+      }
+      const fetcher = OpenAICompaction.fetcher(info.options.fetch) ?? ((input, init) => fetch(input, init))
+      const configuredTimeout = [info.options.headerTimeout, info.options.timeout].find(
+        (value): value is number => typeof value === "number" && value > 0,
+      )
+      const timeout = configuredTimeout ?? 60_000
+      const response = yield* Effect.tryPromise({
+        try: (signal) =>
+          fetcher(endpoint, {
+            method: "POST",
+            headers,
+            body: JSON.stringify(body),
+            signal: AbortSignal.any([signal, AbortSignal.timeout(timeout)]),
+          }),
+        catch: () => undefined,
+      }).pipe(Effect.catch(() => Effect.succeed(undefined)))
+      if (!response) return fallback("network_error")
+      if (!response.ok) return fallback("http_error", response.status)
+      const payload = yield* Effect.tryPromise({
+        try: () => response.json(),
+        catch: () => undefined,
+      }).pipe(Effect.catch(() => Effect.succeed(undefined)))
+      const result = OpenAICompaction.response(payload)
+      if (!result) return fallback("invalid_response")
+      return {
+        status: "success",
+        responseID: result.id,
+        providerID: input.model.providerID,
+        modelID: input.model.id,
+        apiModelID: input.model.api.id,
+        baseURL,
+        authType: credentials?.type === "oauth" ? "oauth" : "api",
+        credentialSalt,
+        credentialFingerprint: fingerprint,
+        output: result.output,
+        time: attemptedAt,
+      } satisfies SessionV1.OpenAICompactionSuccess
     })
 
     // goes backwards through parts until there are PRUNE_PROTECT tokens worth of tool
@@ -326,11 +479,27 @@ const layer = Layer.effect(
       }
 
       const agent = yield* agents.get("compaction")
+      const remoteModel =
+        !input.auto && !flags.experimentalNativeLlm && userMessage.model.providerID === "openai"
+          ? yield* provider
+              .getModel(userMessage.model.providerID, userMessage.model.modelID)
+              .pipe(Effect.catch(() => Effect.succeed(undefined)))
+          : undefined
       const model = agent.model
         ? yield* provider.getModel(agent.model.providerID, agent.model.modelID).pipe(Effect.orDie)
-        : yield* provider.getModel(userMessage.model.providerID, userMessage.model.modelID).pipe(Effect.orDie)
+        : (remoteModel ??
+          (yield* provider.getModel(userMessage.model.providerID, userMessage.model.modelID).pipe(Effect.orDie)))
       const cfg = yield* config.get()
       const history = compactionPart && messages.at(-1)?.info.id === input.parentID ? messages.slice(0, -1) : messages
+      const remoteState =
+        compactionPart && remoteModel?.api.npm === "@ai-sdk/openai"
+          ? yield* remote({
+              messages: history,
+              sessionID: input.sessionID,
+              user: userMessage,
+              model: remoteModel,
+            })
+          : undefined
       const prior = completedCompactions(history)
       const hidden = new Set(prior.flatMap((item) => [item.userIndex, item.assistantIndex]))
       const previousSummary = prior.at(-1)?.summary
@@ -412,11 +581,22 @@ const layer = Layer.effect(
         return "stop"
       }
 
-      if (compactionPart && selected.tail_start_id && compactionPart.tail_start_id !== selected.tail_start_id) {
+      if (
+        compactionPart &&
+        (remoteState || (selected.tail_start_id && compactionPart.tail_start_id !== selected.tail_start_id))
+      ) {
         yield* session.updatePart({
           ...compactionPart,
-          tail_start_id: selected.tail_start_id,
+          ...(remoteState ? { openai: remoteState } : {}),
+          ...(selected.tail_start_id ? { tail_start_id: selected.tail_start_id } : {}),
         })
+        if (remoteState?.status === "fallback") {
+          yield* Effect.logWarning("OpenAI remote compaction fell back to local summary", {
+            "session.id": input.sessionID,
+            reason: remoteState.reason,
+            statusCode: remoteState.statusCode,
+          })
+        }
       }
 
       if (result === "continue" && input.auto) {
@@ -556,6 +736,8 @@ export const node = LayerNode.make({
     Provider.node,
     EventV2Bridge.node,
     RuntimeFlags.node,
+    Auth.node,
+    llmClient,
   ],
 })
 

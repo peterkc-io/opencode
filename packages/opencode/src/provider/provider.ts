@@ -31,6 +31,7 @@ import { ModelV2 } from "@opencode-ai/core/model"
 import { ModelStatus } from "./model-status"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { ProviderError } from "./error"
+import { OpenAICompaction } from "./openai-compaction"
 
 const OPENAI_HEADER_TIMEOUT_DEFAULT = 300_000
 
@@ -1736,7 +1737,11 @@ const layer = Layer.effect(
         delete options["headerTimeout"]
 
         options["fetch"] = async (input: any, init?: BunFetchRequestInit) => {
-          const fetchFn = customFetch ?? fetch
+          const baseFetch = customFetch ?? fetch
+          const fetchFn =
+            model.providerID === "openai" && model.api.npm === "@ai-sdk/openai"
+              ? OpenAICompaction.wrapFetch(baseFetch)
+              : baseFetch
           const opts = init ?? {}
           const chunkAbortCtl = typeof chunkTimeout === "number" && chunkTimeout > 0 ? new AbortController() : undefined
           const headerTimeoutMs = headerTimeout === false ? undefined : headerTimeout

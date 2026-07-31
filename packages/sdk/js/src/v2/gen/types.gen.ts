@@ -614,6 +614,31 @@ export type RetryPart = {
   }
 }
 
+export type OpenAiCompactionSuccess = {
+  status: "success"
+  responseID: string
+  providerID: string
+  modelID: string
+  apiModelID: string
+  baseURL: string
+  authType: "api" | "oauth"
+  credentialSalt: string
+  credentialFingerprint: string
+  output: Array<{
+    [key: string]: unknown
+  }>
+  time: number
+}
+
+export type OpenAiCompactionFallback = {
+  status: "fallback"
+  reason: "http_error" | "network_error" | "invalid_response" | "unsupported_auth"
+  statusCode?: number
+  time: number
+}
+
+export type OpenAiCompactionState = OpenAiCompactionSuccess | OpenAiCompactionFallback
+
 export type CompactionPart = {
   id: string
   sessionID: string
@@ -622,6 +647,7 @@ export type CompactionPart = {
   auto: boolean
   overflow?: boolean
   tail_start_id?: string
+  openai?: OpenAiCompactionState
 }
 
 export type Part =

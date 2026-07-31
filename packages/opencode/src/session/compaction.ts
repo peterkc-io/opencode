@@ -273,7 +273,7 @@ const layer = Layer.effect(
         return fallback("unsupported_auth")
       }
 
-      const baseURL = OpenAICompaction.baseURL(info, input.model)
+      const baseURL = OpenAICompaction.baseURL(yield* provider.getBaseURL(input.model))
       const responsesURL = (() => {
         try {
           return new URL(baseURL)
@@ -325,6 +325,7 @@ const layer = Layer.effect(
           model: input.model,
           provider: info,
           auth: credentials,
+          baseURL,
         })
       ) {
         const replayed = OpenAICompaction.replayInput(body.input, {

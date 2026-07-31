@@ -119,6 +119,33 @@ describe("OpenAICompaction", () => {
     expect(OpenAICompaction.release(token)).toBeUndefined()
   })
 
+  test("expires replay state at lookup time", async () => {
+    const originalNow = Date.now
+    let now = originalNow()
+    Date.now = () => now
+    try {
+      let captured: RequestInit | undefined
+      const token = OpenAICompaction.register({ state, summary: "local summary", oauth: false })
+      const wrapped = OpenAICompaction.wrapFetch(async (_request, init) => {
+        captured = init
+        return new Response("{}")
+      })
+      now += 5 * 60 * 1000 + 1
+
+      await wrapped("https://api.openai.com/v1/responses", {
+        method: "POST",
+        headers: { [OpenAICompaction.TOKEN_HEADER]: token },
+        body: JSON.stringify({ model: "gpt-5.6", input }),
+      })
+
+      if (typeof captured?.body !== "string") throw new Error("Expected original request body")
+      expect(JSON.parse(captured.body).input).toEqual(input)
+      expect(OpenAICompaction.release(token)).toBeUndefined()
+    } finally {
+      Date.now = originalNow
+    }
+  })
+
   test("reports invalid replay requests and builds compact requests", async () => {
     const token = OpenAICompaction.register({ state, summary: "local summary", oauth: false })
     const wrapped = OpenAICompaction.wrapFetch(async () => new Response("{}"))
@@ -144,6 +171,7 @@ describe("OpenAICompaction", () => {
 
     expect(OpenAICompaction.compactURL("https://api.openai.com/v1/responses/")?.pathname).toBe("/v1/responses/compact")
     expect(OpenAICompaction.compactURL("https://api.openai.com/v1/chat/completions")).toBeUndefined()
+    expect(OpenAICompaction.compactURL("not a URL")).toBeUndefined()
     expect(OpenAICompaction.compactBody({ model: "gpt-5.6", input, stream: true, tools: [] })).toEqual({
       model: "gpt-5.6",
       input,
@@ -210,6 +238,7 @@ describe("OpenAICompaction", () => {
     })
     const provider = ProviderTest.info({ key: "sk-test" }, model)
     const auth: Auth.Info = { type: "api", key: "sk-test" }
+    const baseURL = state.baseURL
     const bound = {
       ...state,
       credentialFingerprint: OpenAICompaction.credentialFingerprint(provider, auth, state.credentialSalt)!,
@@ -221,6 +250,7 @@ describe("OpenAICompaction", () => {
         model,
         provider,
         auth,
+        baseURL,
       }),
     ).toBe(true)
     expect(
@@ -229,6 +259,7 @@ describe("OpenAICompaction", () => {
         model: { ...model, id: ModelV2.ID.make("gpt-5.7") },
         provider,
         auth,
+        baseURL,
       }),
     ).toBe(false)
     expect(
@@ -237,21 +268,23 @@ describe("OpenAICompaction", () => {
         model,
         provider,
         auth: changedAuth,
+        baseURL,
       }),
     ).toBe(false)
     expect(OpenAICompaction.credentialFingerprint(provider, auth, "other-salt")).not.toBe(bound.credentialFingerprint)
     const defaultModel = structuredClone(model)
     Reflect.deleteProperty(defaultModel.api, "url")
-    expect(OpenAICompaction.matches({ state: bound, model: defaultModel, provider, auth })).toBe(true)
+    expect(OpenAICompaction.matches({ state: bound, model: defaultModel, provider, auth, baseURL })).toBe(true)
     const compatibleModel = structuredClone(model)
     compatibleModel.api.npm = "@ai-sdk/openai-compatible"
-    expect(OpenAICompaction.matches({ state: bound, model: compatibleModel, provider, auth })).toBe(false)
+    expect(OpenAICompaction.matches({ state: bound, model: compatibleModel, provider, auth, baseURL })).toBe(false)
     expect(
       OpenAICompaction.matches({
         state: { ...bound, baseURL: "https://proxy.example/v1" },
         model: defaultModel,
         provider,
         auth,
+        baseURL,
       }),
     ).toBe(false)
   })

@@ -963,10 +963,11 @@ describe("session.compaction.process", () => {
         yield* createSummaryCompaction(session.id, modelRef)
         const msgs = yield* ssn.messages({ sessionID: session.id })
         const parent = msgs.at(-1)?.info.id
+        if (!parent) return yield* Effect.die("Missing compaction parent")
 
         expect(
           yield* SessionCompaction.use.process({
-            parentID: parent!,
+            parentID: parent,
             messages: msgs,
             sessionID: session.id,
             auto: false,
@@ -1171,10 +1172,11 @@ describe("session.compaction.process", () => {
         yield* createSummaryCompaction(session.id, modelRef, true)
         const msgs = yield* ssn.messages({ sessionID: session.id })
         const parent = msgs.at(-1)?.info.id
+        if (!parent) return yield* Effect.die("Missing compaction parent")
 
         expect(
           yield* SessionCompaction.use.process({
-            parentID: parent!,
+            parentID: parent,
             messages: msgs,
             sessionID: session.id,
             auto: true,

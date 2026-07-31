@@ -110,15 +110,24 @@ export function compactBody(value: unknown) {
 }
 
 export function compactURL(value: string) {
-  const url = new URL(value)
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    return undefined
+  }
   const path = url.pathname.replace(/\/+$/, "")
   if (!path.endsWith("/responses")) return undefined
   url.pathname = `${path}/compact`
   return url
 }
 
-export function baseURL(provider: Provider.Info, model: Provider.Model) {
-  return String(provider.options.baseURL ?? model.api.url ?? DEFAULT_BASE_URL).replace(/\/+$/, "")
+export function baseURL(value: string | undefined) {
+  return String(value ?? DEFAULT_BASE_URL).replace(/\/+$/, "")
+}
+
+export function eligible(model: Provider.Model) {
+  return model.providerID === "openai" && model.api.npm === "@ai-sdk/openai"
 }
 
 function boundary(input: unknown[], summary: string) {
@@ -186,6 +195,10 @@ export function wrapFetch(base: FetchLike): FetchLike {
     if (!token) return base(input, { ...init, headers })
 
     const replay = active.get(token)
+    if (replay && Date.now() - replay.registeredAt > MAX_ACTIVE_AGE_MS) {
+      active.delete(token)
+      return base(input, { ...init, headers })
+    }
     const url = requestURL(input)
     const method = init?.method ?? (input instanceof Request ? input.method : undefined)
     if (!replay) return base(input, { ...init, headers })
@@ -226,17 +239,16 @@ export function matches(input: {
   model: Provider.Model
   provider: Provider.Info
   auth: Auth.Info | undefined
+  baseURL: string
 }) {
   const authType = input.auth?.type === "oauth" ? "oauth" : "api"
-  const currentBaseURL = baseURL(input.provider, input.model)
   const fingerprint = credentialFingerprint(input.provider, input.auth, input.state.credentialSalt)
   return (
-    input.model.providerID === "openai" &&
-    input.model.api.npm === "@ai-sdk/openai" &&
+    eligible(input.model) &&
     input.state.providerID === input.model.providerID &&
     input.state.modelID === input.model.id &&
     input.state.apiModelID === input.model.api.id &&
-    input.state.baseURL === currentBaseURL &&
+    input.state.baseURL === input.baseURL &&
     input.state.authType === authType &&
     fingerprint !== undefined &&
     input.state.credentialFingerprint === fingerprint &&

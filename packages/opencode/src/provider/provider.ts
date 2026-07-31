@@ -1149,6 +1149,7 @@ export type Error = ModelNotFoundError | InitError | NoProvidersError | NoModels
 export interface Interface {
   readonly list: () => Effect.Effect<Record<ProviderV2.ID, Info>>
   readonly getProvider: (providerID: ProviderV2.ID) => Effect.Effect<Info>
+  readonly getBaseURL: (model: Model) => Effect.Effect<string | undefined>
   readonly getModel: (providerID: ProviderV2.ID, modelID: ModelV2.ID) => Effect.Effect<Model, ModelNotFoundError>
   readonly getLanguage: (model: Model) => Effect.Effect<LanguageModelV3, ModelNotFoundError>
   readonly closest: (
@@ -1666,6 +1667,26 @@ const layer = Layer.effect(
 
     const list = Effect.fn("Provider.list")(() => InstanceState.use(state, (s) => s.providers))
 
+    function resolveBaseURL(
+      model: Model,
+      s: State,
+      envs: Record<string, string | undefined>,
+      options: Record<string, any>,
+    ) {
+      let url = typeof options.baseURL === "string" && options.baseURL !== "" ? options.baseURL : model.api.url
+      if (!url) return undefined
+
+      const loader = s.varsLoaders[model.providerID]
+      if (loader) {
+        const vars = loader(options)
+        for (const [key, value] of Object.entries(vars)) {
+          url = url.replaceAll("${" + key + "}", value)
+        }
+      }
+
+      return url.replace(/\$\{([^}]+)\}/g, (item, key) => envs[String(key)] ?? item)
+    }
+
     async function resolveSDK(model: Model, s: State, envs: Record<string, string | undefined>) {
       try {
         const provider = s.providers[model.providerID]
@@ -1691,26 +1712,7 @@ const layer = Layer.effect(
           options["includeUsage"] = true
         }
 
-        const baseURL = iife(() => {
-          let url =
-            typeof options["baseURL"] === "string" && options["baseURL"] !== "" ? options["baseURL"] : model.api.url
-          if (!url) return
-
-          const loader = s.varsLoaders[model.providerID]
-          if (loader) {
-            const vars = loader(options)
-            for (const [key, value] of Object.entries(vars)) {
-              const field = "${" + key + "}"
-              url = url.replaceAll(field, value)
-            }
-          }
-
-          url = url.replace(/\$\{([^}]+)\}/g, (item, key) => {
-            const val = envs[String(key)]
-            return val ?? item
-          })
-          return url
-        })
+        const baseURL = resolveBaseURL(model, s, envs, options)
 
         if (baseURL !== undefined) options["baseURL"] = baseURL
         if (options["apiKey"] === undefined && provider.key) options["apiKey"] = provider.key
@@ -1735,13 +1737,10 @@ const layer = Layer.effect(
         const headerTimeout = options["headerTimeout"]
         delete options["chunkTimeout"]
         delete options["headerTimeout"]
+        const baseFetch = customFetch ?? fetch
+        const fetchFn = OpenAICompaction.eligible(model) ? OpenAICompaction.wrapFetch(baseFetch) : baseFetch
 
         options["fetch"] = async (input: any, init?: BunFetchRequestInit) => {
-          const baseFetch = customFetch ?? fetch
-          const fetchFn =
-            model.providerID === "openai" && model.api.npm === "@ai-sdk/openai"
-              ? OpenAICompaction.wrapFetch(baseFetch)
-              : baseFetch
           const opts = init ?? {}
           const chunkAbortCtl = typeof chunkTimeout === "number" && chunkTimeout > 0 ? new AbortController() : undefined
           const headerTimeoutMs = headerTimeout === false ? undefined : headerTimeout
@@ -1807,6 +1806,14 @@ const layer = Layer.effect(
     const getProvider = Effect.fn("Provider.getProvider")((providerID: ProviderV2.ID) =>
       InstanceState.use(state, (s) => s.providers[providerID]),
     )
+
+    const getBaseURL = Effect.fn("Provider.getBaseURL")(function* (model: Model) {
+      const s = yield* InstanceState.get(state)
+      const envs = yield* env.all()
+      const info = s.providers[model.providerID]
+      if (!info) return undefined
+      return resolveBaseURL(model, s, envs, info.options)
+    })
 
     const getModel = Effect.fn("Provider.getModel")(function* (providerID: ProviderV2.ID, modelID: ModelV2.ID) {
       const s = yield* InstanceState.get(state)
@@ -1979,7 +1986,7 @@ const layer = Layer.effect(
       }
     })
 
-    return Service.of({ list, getProvider, getModel, getLanguage, closest, getSmallModel, defaultModel })
+    return Service.of({ list, getProvider, getBaseURL, getModel, getLanguage, closest, getSmallModel, defaultModel })
   }),
 )
 

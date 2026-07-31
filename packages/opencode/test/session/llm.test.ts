@@ -1457,6 +1457,7 @@ describe("session.llm.stream", () => {
           },
         })
         const fallback = yield* Effect.promise(() => fallbackRequest)
+        expect(fallback.headers.has(OpenAICompaction.TOKEN_HEADER)).toBe(false)
         if (!Array.isArray(fallback.body.input)) throw new Error("Expected OpenAI Responses input")
         expect(JSON.stringify(fallback.body.input)).toContain(OpenAICompaction.COMPACTION_PROMPT)
         expect(JSON.stringify(fallback.body.input)).toContain('"text":"local "')

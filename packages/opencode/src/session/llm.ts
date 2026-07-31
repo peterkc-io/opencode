@@ -97,12 +97,13 @@ const live: Layer.Layer<
         mode: input.agent.mode,
       })
 
-      const [language, cfg, item, info] = yield* Effect.all(
+      const [language, cfg, item, info, resolvedBaseURL] = yield* Effect.all(
         [
           provider.getLanguage(input.model),
           config.get(),
           provider.getProvider(input.model.providerID),
           auth.get(input.model.providerID),
+          provider.getBaseURL(input.model),
         ],
         { concurrency: "unbounded" },
       )
@@ -289,6 +290,7 @@ const live: Layer.Layer<
                 model: input.model,
                 provider: item,
                 auth: info,
+                baseURL: OpenAICompaction.baseURL(resolvedBaseURL),
               })
             ) {
               yield* Effect.logWarning("OpenAI remote compaction binding changed; using local summary", {

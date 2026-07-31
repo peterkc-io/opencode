@@ -407,6 +407,28 @@ it.instance(
 )
 
 it.instance(
+  "resolves environment variables in provider base URLs",
+  Effect.gen(function* () {
+    yield* set("TEST_PROVIDER_HOST", "api.resolved.test")
+    const model = yield* Provider.use.getModel(ProviderV2.ID.make("custom-openai-env"), ModelV2.ID.make("gpt-4"))
+    expect(yield* Provider.use.getBaseURL(model)).toBe("https://api.resolved.test/v1")
+  }),
+  {
+    config: {
+      provider: {
+        "custom-openai-env": {
+          name: "Custom OpenAI",
+          npm: "@ai-sdk/openai-compatible",
+          env: [],
+          models: { "gpt-4": { name: "GPT-4", tool_call: true, limit: { context: 128000, output: 4096 } } },
+          options: { apiKey: "test-key", baseURL: "https://${TEST_PROVIDER_HOST}/v1" },
+        },
+      },
+    },
+  },
+)
+
+it.instance(
   "model cost defaults to zero when not specified",
   Effect.gen(function* () {
     const providers = yield* list

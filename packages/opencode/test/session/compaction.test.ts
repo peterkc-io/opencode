@@ -199,7 +199,7 @@ function createCompactionMarker(sessionID: SessionID) {
 
 function fake(
   input: Parameters<SessionProcessorModule.SessionProcessor.Interface["create"]>[0],
-  result: "continue" | "compact",
+  result: "continue" | "compact" | "stop",
 ) {
   const msg = input.assistantMessage
   return {
@@ -212,7 +212,7 @@ function fake(
   } satisfies SessionProcessorModule.SessionProcessor.Handle
 }
 
-function processorLayer(result: "continue" | "compact") {
+function processorLayer(result: "continue" | "compact" | "stop") {
   return Layer.succeed(
     SessionProcessorModule.SessionProcessor.Service,
     SessionProcessorModule.SessionProcessor.Service.of({
@@ -249,7 +249,7 @@ const compactionEnv = AppNodeBuilder.build(
 const itCompaction = testEffect(compactionEnv)
 
 type CompactionProcessOptions = {
-  result?: "continue" | "compact"
+  result?: "continue" | "compact" | "stop"
   llm?: Layer.Layer<LLM.Service>
   plugin?: Layer.Layer<Plugin.Service>
   provider?: ReturnType<typeof wide>
@@ -1140,6 +1140,55 @@ describe("session.compaction.process", () => {
           reason: "internal_error",
         })
       }).pipe(withCompaction({ provider }))
+    },
+    { git: true },
+  )
+
+  itCompaction.instance(
+    "skips remote compaction when the local summary stops",
+    () => {
+      let requests = 0
+      const model = ProviderTest.model({
+        id: ModelV2.ID.make("gpt-5.6"),
+        providerID: ProviderV2.ID.make("openai"),
+        api: { id: "gpt-5.6", url: "https://api.openai.test/v1", npm: "@ai-sdk/openai" },
+      })
+      const provider = ProviderTest.fake({
+        model,
+        info: ProviderTest.info(
+          {
+            options: {
+              apiKey: "sk-test",
+              fetch: async () => {
+                requests += 1
+                return Response.json({})
+              },
+            },
+          },
+          model,
+        ),
+      })
+      const modelRef = { providerID: model.providerID, modelID: model.id }
+      return Effect.gen(function* () {
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        yield* createUserMessage(session.id, "history", modelRef)
+        yield* createSummaryCompaction(session.id, modelRef)
+        const msgs = yield* ssn.messages({ sessionID: session.id })
+        const parentID = msgs.at(-1)?.info.id
+        if (!parentID) return yield* Effect.die("Missing compaction parent")
+
+        expect(
+          yield* SessionCompaction.use.process({
+            parentID,
+            messages: msgs,
+            sessionID: session.id,
+            auto: false,
+          }),
+        ).toBe("stop")
+        expect(requests).toBe(0)
+        expect((yield* readCompactionPart(session.id))?.openai).toBeUndefined()
+      }).pipe(withCompaction({ provider, result: "stop" }))
     },
     { git: true },
   )

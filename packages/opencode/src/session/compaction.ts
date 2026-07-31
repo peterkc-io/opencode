@@ -394,7 +394,11 @@ const layer = Layer.effect(
       const payload = yield* Effect.tryPromise({
         try: () => response.json(),
         catch: () => undefined,
-      }).pipe(Effect.catch(() => Effect.succeed(undefined)))
+      }).pipe(
+        Effect.catch(() =>
+          Effect.promise(() => response.body?.cancel() ?? Promise.resolve()).pipe(Effect.ignore, Effect.as(undefined)),
+        ),
+      )
       const result = OpenAICompaction.response(payload)
       if (!result) return fallback("invalid_response")
       return {
@@ -603,20 +607,21 @@ const layer = Layer.effect(
       }
 
       if (processor.message.error) return "stop"
-      const remoteState = remoteInput
-        ? yield* remote(remoteInput).pipe(
-            Effect.catchCause((cause) =>
-              Cause.hasInterrupts(cause)
-                ? Effect.failCause(cause)
-                : Effect.succeed({
-                    status: "fallback" as const,
-                    reason: "internal_error" as const,
-                    statusCode: undefined,
-                    time: Date.now(),
-                  }),
-            ),
-          )
-        : undefined
+      const remoteState =
+        remoteInput && result === "continue"
+          ? yield* remote(remoteInput).pipe(
+              Effect.catchCause((cause) =>
+                Cause.hasInterrupts(cause)
+                  ? Effect.failCause(cause)
+                  : Effect.succeed({
+                      status: "fallback" as const,
+                      reason: "internal_error" as const,
+                      statusCode: undefined,
+                      time: Date.now(),
+                    }),
+              ),
+            )
+          : undefined
 
       if (
         compactionPart &&

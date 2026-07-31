@@ -203,7 +203,7 @@ export function wrapFetch(base: FetchLike): FetchLike {
     const method = init?.method ?? (input instanceof Request ? input.method : undefined)
     if (!replay) return base(input, { ...init, headers })
     if (!url || method !== "POST" || !url.pathname.replace(/\/+$/, "").endsWith("/responses")) {
-      replay.failure = "invalid_request"
+      replay.failure ??= "invalid_request"
       return base(input, { ...init, headers })
     }
 
@@ -213,18 +213,17 @@ export function wrapFetch(base: FetchLike): FetchLike {
       parsed = record(body ? JSON.parse(body) : undefined)
     } catch {}
     if (!parsed || parsed.model !== replay.state.apiModelID) {
-      replay.failure = "invalid_request"
+      replay.failure ??= "invalid_request"
       return base(input, { ...init, headers })
     }
 
     const rewritten = replayInput(parsed.input, replay)
     if (!rewritten) {
-      replay.failure = "boundary_not_found"
+      replay.failure ??= "boundary_not_found"
       return base(input, { ...init, headers })
     }
 
     if (replay.oauth) headers.set(HTTP_HEADER, "true")
-    replay.failure = undefined
     headers.delete("content-length")
     return base(input, {
       ...init,

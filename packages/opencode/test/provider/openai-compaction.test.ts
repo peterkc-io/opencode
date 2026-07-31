@@ -84,7 +84,7 @@ describe("OpenAICompaction", () => {
     ).toBeUndefined()
   })
 
-  test("uses scoped replay state across retries and strips the token", async () => {
+  test("preserves replay failures across retries and strips the token", async () => {
     const requests: Array<{ headers: Headers; body: Record<string, unknown> }> = []
     const base: OpenAICompaction.FetchLike = async (_request, init) => {
       if (typeof init?.body !== "string") throw new Error("Expected JSON request body")
@@ -116,7 +116,7 @@ describe("OpenAICompaction", () => {
     expect(requests[1]?.headers.get(OpenAICompaction.HTTP_HEADER)).toBe("true")
     expect(requests[1]?.headers.has("content-length")).toBe(false)
     expect(requests[1]?.body.input).toEqual([input[0], ...canonical, input[3]])
-    expect(OpenAICompaction.release(token)).toBeUndefined()
+    expect(OpenAICompaction.release(token)).toBe("boundary_not_found")
   })
 
   test("expires replay state at lookup time", async () => {
@@ -285,16 +285,16 @@ describe("OpenAICompaction", () => {
       }),
     ).toBe(false)
     expect(OpenAICompaction.credentialFingerprint(provider, auth, "other-salt")).not.toBe(bound.credentialFingerprint)
-    const defaultModel = structuredClone(model)
-    Reflect.deleteProperty(defaultModel.api, "url")
-    expect(OpenAICompaction.matches({ state: bound, model: defaultModel, provider, auth, baseURL })).toBe(true)
+    const defaultBaseURL = OpenAICompaction.baseURL(undefined)
+    expect(defaultBaseURL).toBe(OpenAICompaction.DEFAULT_BASE_URL)
+    expect(OpenAICompaction.matches({ state: bound, model, provider, auth, baseURL: defaultBaseURL })).toBe(true)
     const compatibleModel = structuredClone(model)
     compatibleModel.api.npm = "@ai-sdk/openai-compatible"
     expect(OpenAICompaction.matches({ state: bound, model: compatibleModel, provider, auth, baseURL })).toBe(false)
     expect(
       OpenAICompaction.matches({
         state: { ...bound, baseURL: "https://proxy.example/v1" },
-        model: defaultModel,
+        model,
         provider,
         auth,
         baseURL,

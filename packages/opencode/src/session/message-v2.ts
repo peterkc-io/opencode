@@ -579,7 +579,7 @@ export function openAICompaction(msgs: WithParts[]) {
   if (!boundary || boundary.info.role !== "user") return undefined
   const part = boundary.parts.find((item): item is CompactionPart => item.type === "compaction")
   if (part?.openai?.status !== "success") return undefined
-  const summary = msgs.find(
+  const summary = msgs.findLast(
     (msg) =>
       msg.info.role === "assistant" &&
       msg.info.parentID === boundary.info.id &&

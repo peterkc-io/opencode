@@ -209,7 +209,7 @@ export type OpenAICompactionSuccess = Types.DeepMutable<Schema.Schema.Type<typeo
 
 export const OpenAICompactionFallback = Schema.Struct({
   status: Schema.Literal("fallback"),
-  reason: Schema.Literals(["http_error", "network_error", "invalid_response", "unsupported_auth"]),
+  reason: Schema.Literals(["http_error", "network_error", "invalid_response", "unsupported_auth", "internal_error"]),
   statusCode: Schema.optional(NonNegativeInt),
   time: NonNegativeInt,
 }).annotate({ identifier: "OpenAICompactionFallback" })

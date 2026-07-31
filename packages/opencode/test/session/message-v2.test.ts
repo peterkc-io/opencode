@@ -1700,5 +1700,35 @@ describe("session.message-v2.latest", () => {
       info: { ...assistantInfo(SUMMARY_ASSISTANT, COMPACTION_USER), summary: true },
     }
     expect(MessageV2.openAICompaction([user, unfinished])).toBeUndefined()
+    const errored: SessionV1.WithParts = {
+      ...summary,
+      info: {
+        ...assistantInfo(
+          SUMMARY_ASSISTANT,
+          COMPACTION_USER,
+          new SessionV1.AuthError({ providerID: "openai", message: "expired" }).toObject(),
+        ),
+        summary: true,
+        finish: "stop",
+      },
+    }
+    expect(MessageV2.openAICompaction([user, errored])).toBeUndefined()
+    const fallback: SessionV1.WithParts = {
+      ...user,
+      parts: [
+        {
+          ...basePart(COMPACTION_USER, "fallback"),
+          type: "compaction",
+          auto: false,
+          openai: { status: "fallback", reason: "network_error", time: 1 },
+        },
+      ],
+    }
+    expect(MessageV2.openAICompaction([fallback, summary])).toBeUndefined()
+    const empty: SessionV1.WithParts = {
+      ...summary,
+      parts: [{ ...basePart(SUMMARY_ASSISTANT, "empty"), type: "text", text: "  " }],
+    }
+    expect(MessageV2.openAICompaction([user, empty])).toBeUndefined()
   })
 })

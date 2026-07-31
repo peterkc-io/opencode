@@ -12,7 +12,7 @@ import { Plugin } from "@/plugin"
 import { Config } from "@/config/config"
 import { NotFoundError } from "@/storage/storage"
 
-import { Effect, Layer, Context } from "effect"
+import { Cause, Effect, Layer, Context } from "effect"
 import { InstanceState } from "@/effect/instance-state"
 import { isOverflow as overflow, usable } from "./overflow"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
@@ -354,18 +354,34 @@ const layer = Layer.effect(
         headers.set("authorization", `Bearer ${apiKey}`)
       }
       const fetcher = OpenAICompaction.fetcher(info.options.fetch) ?? ((input, init) => fetch(input, init))
-      const configuredTimeout = [info.options.headerTimeout, info.options.timeout].find(
-        (value): value is number => typeof value === "number" && value > 0,
-      )
-      const timeout = configuredTimeout ?? 60_000
+      const timeout =
+        typeof info.options.timeout === "number" && info.options.timeout > 0 ? info.options.timeout : 60_000
+      const headerTimeout =
+        typeof info.options.headerTimeout === "number" && info.options.headerTimeout > 0
+          ? info.options.headerTimeout
+          : undefined
       const response = yield* Effect.tryPromise({
-        try: (signal) =>
-          fetcher(endpoint, {
-            method: "POST",
-            headers,
-            body: JSON.stringify(body),
-            signal: AbortSignal.any([signal, AbortSignal.timeout(timeout)]),
-          }),
+        try: async (signal) => {
+          const headerController = headerTimeout ? new AbortController() : undefined
+          const headerTimer = headerController
+            ? setTimeout(
+                () => headerController.abort(new Error("OpenAI compact response header timeout")),
+                headerTimeout,
+              )
+            : undefined
+          const signals = [signal, AbortSignal.timeout(timeout)]
+          if (headerController) signals.push(headerController.signal)
+          try {
+            return await fetcher(endpoint, {
+              method: "POST",
+              headers,
+              body: JSON.stringify(body),
+              signal: AbortSignal.any(signals),
+            })
+          } finally {
+            if (headerTimer) clearTimeout(headerTimer)
+          }
+        },
         catch: () => undefined,
       }).pipe(Effect.catch(() => Effect.succeed(undefined)))
       if (!response) return fallback("network_error")
@@ -498,7 +514,18 @@ const layer = Layer.effect(
               sessionID: input.sessionID,
               user: userMessage,
               model: remoteModel,
-            })
+            }).pipe(
+              Effect.catchCause((cause) =>
+                Cause.hasInterrupts(cause)
+                  ? Effect.failCause(cause)
+                  : Effect.succeed({
+                      status: "fallback" as const,
+                      reason: "internal_error" as const,
+                      statusCode: undefined,
+                      time: Date.now(),
+                    }),
+              ),
+            )
           : undefined
       const prior = completedCompactions(history)
       const hidden = new Set(prior.flatMap((item) => [item.userIndex, item.assistantIndex]))

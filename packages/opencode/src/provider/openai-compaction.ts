@@ -199,6 +199,8 @@ export function wrapFetch(base: FetchLike): FetchLike {
     }
 
     if (replay.oauth) headers.set(HTTP_HEADER, "true")
+    replay.failure = undefined
+    headers.delete("content-length")
     return base(input, {
       ...init,
       headers,
@@ -217,6 +219,8 @@ export function matches(input: {
   const currentBaseURL = baseURL(input.provider, input.model)
   const fingerprint = credentialFingerprint(input.provider, input.auth, input.state.credentialSalt)
   return (
+    input.model.providerID === "openai" &&
+    input.model.api.npm === "@ai-sdk/openai" &&
     input.state.providerID === input.model.providerID &&
     input.state.modelID === input.model.id &&
     input.state.apiModelID === input.model.api.id &&

@@ -632,7 +632,7 @@ export type OpenAiCompactionSuccess = {
 
 export type OpenAiCompactionFallback = {
   status: "fallback"
-  reason: "http_error" | "network_error" | "invalid_response" | "unsupported_auth"
+  reason: "http_error" | "network_error" | "invalid_response" | "unsupported_auth" | "internal_error"
   statusCode?: number
   time: number
 }

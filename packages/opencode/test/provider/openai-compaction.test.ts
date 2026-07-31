@@ -96,23 +96,46 @@ describe("OpenAICompaction", () => {
     }
     const token = OpenAICompaction.register({ state, summary: "local summary", oauth: true })
     const wrapped = OpenAICompaction.wrapFetch(base)
-    const request = () =>
+    const request = (bodyInput: unknown, contentLength?: string) =>
       wrapped("https://api.openai.com/v1/responses", {
         method: "POST",
-        headers: { [OpenAICompaction.TOKEN_HEADER]: token },
-        body: JSON.stringify({ model: "gpt-5.6", input }),
+        headers: {
+          [OpenAICompaction.TOKEN_HEADER]: token,
+          ...(contentLength ? { "content-length": contentLength } : {}),
+        },
+        body: JSON.stringify({ model: "gpt-5.6", input: bodyInput }),
       })
 
-    await request()
-    await request()
+    const missing = [{ role: "user", content: "unrelated" }]
+    await request(missing)
+    await request(input, "999")
 
     expect(requests).toHaveLength(2)
-    for (const item of requests) {
-      expect(item.headers.has(OpenAICompaction.TOKEN_HEADER)).toBe(false)
-      expect(item.headers.get(OpenAICompaction.HTTP_HEADER)).toBe("true")
-      expect(item.body.input).toEqual([input[0], ...canonical, input[3]])
-    }
+    expect(requests[0]?.headers.has(OpenAICompaction.TOKEN_HEADER)).toBe(false)
+    expect(requests[0]?.body.input).toEqual(missing)
+    expect(requests[1]?.headers.get(OpenAICompaction.HTTP_HEADER)).toBe("true")
+    expect(requests[1]?.headers.has("content-length")).toBe(false)
+    expect(requests[1]?.body.input).toEqual([input[0], ...canonical, input[3]])
     expect(OpenAICompaction.release(token)).toBeUndefined()
+  })
+
+  test("reports invalid replay requests and builds compact requests", async () => {
+    const token = OpenAICompaction.register({ state, summary: "local summary", oauth: false })
+    const wrapped = OpenAICompaction.wrapFetch(async () => new Response("{}"))
+    await wrapped("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: { [OpenAICompaction.TOKEN_HEADER]: token },
+      body: JSON.stringify({ model: "gpt-5.5", input }),
+    })
+    expect(OpenAICompaction.release(token)).toBe("invalid_request")
+    expect(OpenAICompaction.compactURL("https://api.openai.com/v1/responses/")?.pathname).toBe("/v1/responses/compact")
+    expect(OpenAICompaction.compactURL("https://api.openai.com/v1/chat/completions")).toBeUndefined()
+    expect(OpenAICompaction.compactBody({ model: "gpt-5.6", input, stream: true, tools: [] })).toEqual({
+      model: "gpt-5.6",
+      input,
+      tools: [],
+    })
+    expect(OpenAICompaction.compactBody({ model: "gpt-5.6", input: [] })).toBeUndefined()
   })
 
   test("keeps the local summary when the boundary cannot be found", async () => {
@@ -176,6 +199,9 @@ describe("OpenAICompaction", () => {
     const defaultModel = structuredClone(model)
     Reflect.deleteProperty(defaultModel.api, "url")
     expect(OpenAICompaction.matches({ state: bound, model: defaultModel, provider, auth })).toBe(true)
+    const compatibleModel = structuredClone(model)
+    compatibleModel.api.npm = "@ai-sdk/openai-compatible"
+    expect(OpenAICompaction.matches({ state: bound, model: compatibleModel, provider, auth })).toBe(false)
     expect(
       OpenAICompaction.matches({
         state: { ...bound, baseURL: "https://proxy.example/v1" },

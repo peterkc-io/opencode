@@ -963,7 +963,7 @@ describe("session.compaction.process", () => {
           {
             options: {
               apiKey: "sk-test",
-              headerTimeout: 5,
+              timeout: 5,
               fetch: async (_input: RequestInfo | URL, init?: RequestInit) => {
                 requests += 1
                 if (requests === 1) return new Response("secret response body", { status: 429 })
@@ -1006,6 +1006,96 @@ describe("session.compaction.process", () => {
           reason: "network_error",
           statusCode: undefined,
           time: expect.any(Number),
+        })
+      }).pipe(withCompaction({ provider }))
+    },
+    { git: true },
+  )
+
+  itCompaction.instance(
+    "records unsupported authentication without calling the compact endpoint",
+    () => {
+      let requests = 0
+      const model = ProviderTest.model({
+        id: ModelV2.ID.make("gpt-5.6"),
+        providerID: ProviderV2.ID.make("openai"),
+        api: { id: "gpt-5.6", url: "https://api.openai.test/v1", npm: "@ai-sdk/openai" },
+      })
+      const provider = ProviderTest.fake({
+        model,
+        info: ProviderTest.info(
+          {
+            options: {
+              fetch: async () => {
+                requests += 1
+                return Response.json({})
+              },
+            },
+          },
+          model,
+        ),
+      })
+      const modelRef = { providerID: model.providerID, modelID: model.id }
+      return Effect.gen(function* () {
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        yield* createUserMessage(session.id, "history", modelRef)
+        yield* createSummaryCompaction(session.id, modelRef)
+        const msgs = yield* ssn.messages({ sessionID: session.id })
+        const parentID = msgs.at(-1)?.info.id
+        if (!parentID) return yield* Effect.die("Missing compaction parent")
+
+        expect(
+          yield* SessionCompaction.use.process({
+            parentID,
+            messages: msgs,
+            sessionID: session.id,
+            auto: false,
+          }),
+        ).toBe("continue")
+        expect(requests).toBe(0)
+        expect((yield* readCompactionPart(session.id))?.openai).toMatchObject({
+          status: "fallback",
+          reason: "unsupported_auth",
+        })
+      }).pipe(withCompaction({ provider }))
+    },
+    { git: true },
+  )
+
+  itCompaction.instance(
+    "keeps local compaction when remote preparation fails internally",
+    () => {
+      const model = ProviderTest.model({
+        id: ModelV2.ID.make("gpt-5.6"),
+        providerID: ProviderV2.ID.make("openai"),
+        api: { id: "gpt-5.6", url: "https://api.openai.test/v1", npm: "@ai-sdk/openai" },
+      })
+      const provider = ProviderTest.fake({
+        model,
+        getProvider: () => Effect.die(new Error("remote provider lookup failed")),
+      })
+      const modelRef = { providerID: model.providerID, modelID: model.id }
+      return Effect.gen(function* () {
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        yield* createUserMessage(session.id, "history", modelRef)
+        yield* createSummaryCompaction(session.id, modelRef)
+        const msgs = yield* ssn.messages({ sessionID: session.id })
+        const parentID = msgs.at(-1)?.info.id
+        if (!parentID) return yield* Effect.die("Missing compaction parent")
+
+        expect(
+          yield* SessionCompaction.use.process({
+            parentID,
+            messages: msgs,
+            sessionID: session.id,
+            auto: false,
+          }),
+        ).toBe("continue")
+        expect((yield* readCompactionPart(session.id))?.openai).toMatchObject({
+          status: "fallback",
+          reason: "internal_error",
         })
       }).pipe(withCompaction({ provider }))
     },

@@ -1349,36 +1349,31 @@ describe("session.llm.stream", () => {
     () =>
       Effect.gen(function* () {
         const model = loadFixture("openai", "gpt-5.2").model
-        const request = waitRequest(
-          "/responses",
-          createEventResponse(
-            [
-              {
-                type: "response.created",
-                response: {
-                  id: "resp-compaction-replay",
-                  created_at: Math.floor(Date.now() / 1000),
-                  model: model.id,
-                  service_tier: null,
-                },
+        const events = [
+          {
+            type: "response.created",
+            response: {
+              id: "resp-compaction-replay",
+              created_at: Math.floor(Date.now() / 1000),
+              model: model.id,
+              service_tier: null,
+            },
+          },
+          {
+            type: "response.completed",
+            response: {
+              incomplete_details: null,
+              usage: {
+                input_tokens: 1,
+                input_tokens_details: null,
+                output_tokens: 0,
+                output_tokens_details: null,
               },
-              {
-                type: "response.completed",
-                response: {
-                  incomplete_details: null,
-                  usage: {
-                    input_tokens: 1,
-                    input_tokens_details: null,
-                    output_tokens: 0,
-                    output_tokens_details: null,
-                  },
-                  service_tier: null,
-                },
-              },
-            ],
-            true,
-          ),
-        )
+              service_tier: null,
+            },
+          },
+        ]
+        const request = waitRequest("/responses", createEventResponse(events, true))
         const resolved = yield* Provider.use.getModel(ProviderV2.ID.openai, ModelV2.ID.make(model.id))
         const provider = yield* Provider.use.getProvider(ProviderV2.ID.openai)
         const sessionID = SessionID.make("session-test-compaction-replay")
@@ -1392,8 +1387,23 @@ describe("session.llm.stream", () => {
           permission: [{ permission: "*", pattern: "*", action: "allow" }],
         } satisfies Agent.Info
         const canonical = { id: "cmp_1", type: "compaction", encrypted_content: "encrypted" }
-
-        yield* drain({
+        const openAICompaction = {
+          summary: "local summary",
+          state: {
+            status: "success",
+            responseID: "resp_compact",
+            providerID: ProviderV2.ID.openai,
+            modelID: resolved.id,
+            apiModelID: resolved.api.id,
+            baseURL: `${state.server!.url.origin}/v1`,
+            authType: "api",
+            credentialSalt: salt,
+            credentialFingerprint: fingerprint!,
+            output: [canonical],
+            time: 1,
+          },
+        } satisfies NonNullable<LLM.StreamInput["openAICompaction"]>
+        const streamInput: LLM.StreamInput = {
           user: {
             id: MessageID.make("msg_user-compaction-replay"),
             sessionID,
@@ -1417,24 +1427,11 @@ describe("session.llm.stream", () => {
             },
             { role: "user", content: "next" },
           ],
-          openAICompaction: {
-            summary: "local summary",
-            state: {
-              status: "success",
-              responseID: "resp_compact",
-              providerID: ProviderV2.ID.openai,
-              modelID: resolved.id,
-              apiModelID: resolved.api.id,
-              baseURL: `${state.server!.url.origin}/v1`,
-              authType: "api",
-              credentialSalt: salt,
-              credentialFingerprint: fingerprint!,
-              output: [canonical],
-              time: 1,
-            },
-          },
+          openAICompaction,
           tools: {},
-        })
+        }
+
+        yield* drain(streamInput)
 
         const capture = yield* Effect.promise(() => request)
         expect(capture.headers.has(OpenAICompaction.TOKEN_HEADER)).toBe(false)
@@ -1442,6 +1439,28 @@ describe("session.llm.stream", () => {
         expect(JSON.stringify(capture.body.input)).not.toContain(OpenAICompaction.COMPACTION_PROMPT)
         expect(JSON.stringify(capture.body.input)).not.toContain("local summary")
         expect(capture.body.input.filter((item) => item?.type === "compaction")).toEqual([canonical])
+
+        const fallbackRequest = waitRequest("/responses", createEventResponse(events, true))
+        const fallbackSessionID = SessionID.make("session-test-compaction-binding-fallback")
+        yield* drain({
+          ...streamInput,
+          sessionID: fallbackSessionID,
+          user: {
+            ...streamInput.user,
+            id: MessageID.make("msg_user-compaction-binding-fallback"),
+            sessionID: fallbackSessionID,
+          },
+          openAICompaction: {
+            ...openAICompaction,
+            state: { ...openAICompaction.state, credentialFingerprint: "stale-fingerprint" },
+          },
+        })
+        const fallback = yield* Effect.promise(() => fallbackRequest)
+        if (!Array.isArray(fallback.body.input)) throw new Error("Expected OpenAI Responses input")
+        expect(JSON.stringify(fallback.body.input)).toContain(OpenAICompaction.COMPACTION_PROMPT)
+        expect(JSON.stringify(fallback.body.input)).toContain('"text":"local "')
+        expect(JSON.stringify(fallback.body.input)).toContain('"text":"summary\\n"')
+        expect(fallback.body.input.filter((item) => item?.type === "compaction")).toEqual([])
       }),
     { config: () => openAIConfig(loadFixture("openai", "gpt-5.2").model, `${state.server!.url.origin}/v1`) },
   )

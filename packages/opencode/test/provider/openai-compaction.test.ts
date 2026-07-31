@@ -128,6 +128,20 @@ describe("OpenAICompaction", () => {
       body: JSON.stringify({ model: "gpt-5.5", input }),
     })
     expect(OpenAICompaction.release(token)).toBe("invalid_request")
+
+    for (const [url, method] of [
+      ["https://api.openai.com/v1/chat/completions", "POST"],
+      ["https://api.openai.com/v1/responses", "GET"],
+    ]) {
+      const skipped = OpenAICompaction.register({ state, summary: "local summary", oauth: false })
+      await wrapped(url, {
+        method,
+        headers: { [OpenAICompaction.TOKEN_HEADER]: skipped },
+        body: JSON.stringify({ model: "gpt-5.6", input }),
+      })
+      expect(OpenAICompaction.release(skipped)).toBe("invalid_request")
+    }
+
     expect(OpenAICompaction.compactURL("https://api.openai.com/v1/responses/")?.pathname).toBe("/v1/responses/compact")
     expect(OpenAICompaction.compactURL("https://api.openai.com/v1/chat/completions")).toBeUndefined()
     expect(OpenAICompaction.compactBody({ model: "gpt-5.6", input, stream: true, tools: [] })).toEqual({

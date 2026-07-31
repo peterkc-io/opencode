@@ -188,7 +188,9 @@ export function wrapFetch(base: FetchLike): FetchLike {
     const replay = active.get(token)
     const url = requestURL(input)
     const method = init?.method ?? (input instanceof Request ? input.method : undefined)
-    if (!replay || !url || method !== "POST" || !url.pathname.replace(/\/+$/, "").endsWith("/responses")) {
+    if (!replay) return base(input, { ...init, headers })
+    if (!url || method !== "POST" || !url.pathname.replace(/\/+$/, "").endsWith("/responses")) {
+      replay.failure = "invalid_request"
       return base(input, { ...init, headers })
     }
 

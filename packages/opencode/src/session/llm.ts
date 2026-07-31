@@ -247,6 +247,13 @@ const live: Layer.Layer<
           abort: input.abort,
         })
         if (native.type === "supported") {
+          if (openAICompaction) {
+            yield* Effect.logInfo("OpenAI remote compaction unavailable for native runtime; using local summary", {
+              "session.id": input.sessionID,
+              providerID: input.model.providerID,
+              modelID: input.model.id,
+            })
+          }
           yield* Effect.logInfo("llm runtime selected", {
             "llm.runtime": "native",
             "llm.provider": input.model.providerID,

@@ -244,6 +244,18 @@ describe("OpenAICompaction", () => {
       credentialFingerprint: OpenAICompaction.credentialFingerprint(provider, auth, state.credentialSalt)!,
     }
     const changedAuth: Auth.Info = { type: "api", key: "sk-different" }
+    const oauth: Auth.Info = {
+      type: "oauth",
+      refresh: "refresh",
+      access: "access",
+      expires: Date.now() + 60_000,
+      accountId: "account",
+    }
+    const oauthState = {
+      ...bound,
+      authType: "oauth" as const,
+      credentialFingerprint: OpenAICompaction.credentialFingerprint(provider, oauth, state.credentialSalt)!,
+    }
     expect(
       OpenAICompaction.matches({
         state: bound,
@@ -253,6 +265,7 @@ describe("OpenAICompaction", () => {
         baseURL,
       }),
     ).toBe(true)
+    expect(OpenAICompaction.matches({ state: oauthState, model, provider, auth: oauth, baseURL })).toBe(true)
     expect(
       OpenAICompaction.matches({
         state: bound,

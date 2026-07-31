@@ -895,6 +895,10 @@ describe("session.compaction.process", () => {
             status: "success",
             responseID: "resp_1",
             modelID: model.id,
+            authType: "api",
+            baseURL: "https://api.openai.test/v1",
+            credentialSalt: expect.any(String),
+            credentialFingerprint: expect.any(String),
             output: canonical,
           },
         })

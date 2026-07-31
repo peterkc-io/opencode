@@ -1860,9 +1860,10 @@ it.instance("Google Vertex: uses REP endpoint for Claude continental multi-regio
       ModelV2.ID.make("claude-sonnet-4-6@default"),
     )
     const language = yield* provider.getLanguage(model)
-    expect(languageBaseURL(language)).toBe(
-      "https://aiplatform.eu.rep.googleapis.com/v1/projects/test-project/locations/eu/publishers/anthropic/models",
-    )
+    const expected =
+      "https://aiplatform.eu.rep.googleapis.com/v1/projects/test-project/locations/eu/publishers/anthropic/models"
+    expect(languageBaseURL(language)).toBe(expected)
+    expect(yield* provider.getBaseURL(model)).toBe(expected)
   }),
 )
 

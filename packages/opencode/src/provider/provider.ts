@@ -1667,6 +1667,22 @@ const layer = Layer.effect(
 
     const list = Effect.fn("Provider.list")(() => InstanceState.use(state, (s) => s.providers))
 
+    function initialOptions(model: Model, provider: Info) {
+      const options = { ...provider.options }
+      if (
+        model.providerID === "google-vertex" &&
+        model.api.npm === "@ai-sdk/google-vertex/anthropic" &&
+        !options.baseURL
+      ) {
+        const baseURL = googleVertexAnthropicBaseURL(
+          typeof options.project === "string" ? options.project : undefined,
+          typeof options.location === "string" ? options.location : undefined,
+        )
+        if (baseURL) options.baseURL = baseURL
+      }
+      return options
+    }
+
     function resolveBaseURL(
       model: Model,
       s: State,
@@ -1690,19 +1706,7 @@ const layer = Layer.effect(
     async function resolveSDK(model: Model, s: State, envs: Record<string, string | undefined>) {
       try {
         const provider = s.providers[model.providerID]
-        const options = { ...provider.options }
-
-        if (
-          model.providerID === "google-vertex" &&
-          model.api.npm === "@ai-sdk/google-vertex/anthropic" &&
-          !options.baseURL
-        ) {
-          const baseURL = googleVertexAnthropicBaseURL(
-            typeof options.project === "string" ? options.project : undefined,
-            typeof options.location === "string" ? options.location : undefined,
-          )
-          if (baseURL) options.baseURL = baseURL
-        }
+        const options = initialOptions(model, provider)
 
         if (model.providerID === "google-vertex" && !model.api.npm.includes("@ai-sdk/openai-compatible")) {
           delete options.fetch
@@ -1812,7 +1816,7 @@ const layer = Layer.effect(
       const envs = yield* env.all()
       const info = s.providers[model.providerID]
       if (!info) return undefined
-      return resolveBaseURL(model, s, envs, info.options)
+      return resolveBaseURL(model, s, envs, initialOptions(model, info))
     })
 
     const getModel = Effect.fn("Provider.getModel")(function* (providerID: ProviderV2.ID, modelID: ModelV2.ID) {

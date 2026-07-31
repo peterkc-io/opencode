@@ -347,5 +347,24 @@ describe("OpenAICompaction", () => {
         baseURL,
       }),
     ).toBe(false)
+    expect(
+      OpenAICompaction.matches({
+        state: { ...bound, output: [{ type: "compaction", encrypted_content: "" }] },
+        model,
+        provider,
+        auth,
+        baseURL,
+      }),
+    ).toBe(false)
+    const oauthWithoutAccount: Auth.Info = {
+      type: "oauth",
+      refresh: "refresh",
+      access: "access",
+      expires: Date.now() + 60_000,
+    }
+    expect(OpenAICompaction.credentialFingerprint(provider, oauthWithoutAccount, state.credentialSalt)).toBeUndefined()
+    expect(OpenAICompaction.matches({ state: oauthState, model, provider, auth: oauthWithoutAccount, baseURL })).toBe(
+      false,
+    )
   })
 })

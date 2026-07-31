@@ -5,6 +5,7 @@ import { OpenAIWebSocket } from "./ws"
 import { OpenAICompaction } from "@/provider/openai-compaction"
 
 export const TITLE_HEADER = "x-opencode-title"
+const INTERNAL_HEADERS = [TITLE_HEADER, OpenAICompaction.HTTP_HEADER]
 
 export interface CreateWebSocketFetchOptions {
   httpFetch?: typeof globalThis.fetch
@@ -254,26 +255,21 @@ export function withoutInternalHeaders<T extends { headers?: HeadersInit }>(init
   if (!init?.headers) return init
   if (init.headers instanceof Headers) {
     const headers = new Headers(init.headers)
-    headers.delete(TITLE_HEADER)
-    headers.delete(OpenAICompaction.HTTP_HEADER)
+    for (const name of INTERNAL_HEADERS) headers.delete(name)
     return { ...init, headers }
   }
 
   if (Array.isArray(init.headers)) {
     return {
       ...init,
-      headers: init.headers.filter(
-        (item) => ![TITLE_HEADER, OpenAICompaction.HTTP_HEADER].includes(item[0].toLowerCase()),
-      ),
+      headers: init.headers.filter((item) => !INTERNAL_HEADERS.includes(item[0].toLowerCase())),
     }
   }
 
   return {
     ...init,
     headers: Object.fromEntries(
-      Object.entries(init.headers).filter(
-        ([key]) => ![TITLE_HEADER, OpenAICompaction.HTTP_HEADER].includes(key.toLowerCase()),
-      ),
+      Object.entries(init.headers).filter(([key]) => !INTERNAL_HEADERS.includes(key.toLowerCase())),
     ),
   }
 }

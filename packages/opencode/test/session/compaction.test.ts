@@ -1081,30 +1081,28 @@ describe("session.compaction.process", () => {
         providerID: ProviderV2.ID.make("openai"),
         api: { id: "gpt-5.6", url: "https://api.openai.test/v1", npm: "@ai-sdk/openai" },
       })
-      const provider = ProviderTest.fake({
-        model,
-        info: ProviderTest.info(
-          {
-            options: {
-              apiKey: "sk-test",
-              timeout: 5,
-              fetch: async (_input: RequestInfo | URL, init?: RequestInit) => {
-                requests += 1
-                if (requests === 1) {
-                  rejectedResponse = new Response("secret response body", { status: 429 })
-                  return rejectedResponse
-                }
-                if (!init?.signal) throw new Error("Expected compact request signal")
-                return new Promise<Response>((_resolve, reject) => {
-                  if (init.signal?.aborted) return reject(init.signal.reason)
-                  init.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true })
-                })
-              },
+      const info = ProviderTest.info(
+        {
+          options: {
+            apiKey: "sk-test",
+            timeout: 1_000,
+            fetch: async (_input: RequestInfo | URL, init?: RequestInit) => {
+              requests += 1
+              if (requests === 1) {
+                rejectedResponse = new Response("secret response body", { status: 429 })
+                return rejectedResponse
+              }
+              if (!init?.signal) throw new Error("Expected compact request signal")
+              return new Promise<Response>((_resolve, reject) => {
+                if (init.signal?.aborted) return reject(init.signal.reason)
+                init.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true })
+              })
             },
           },
-          model,
-        ),
-      })
+        },
+        model,
+      )
+      const provider = ProviderTest.fake({ model, info })
       const modelRef = { providerID: model.providerID, modelID: model.id }
       return Effect.gen(function* () {
         const ssn = yield* SessionNs.Service
@@ -1128,6 +1126,7 @@ describe("session.compaction.process", () => {
         })
         expect(rejectedResponse?.bodyUsed).toBe(true)
 
+        info.options.timeout = 5
         const timedOut = yield* ssn.create({})
         expect((yield* compact(timedOut.id))?.openai).toEqual({
           status: "fallback",

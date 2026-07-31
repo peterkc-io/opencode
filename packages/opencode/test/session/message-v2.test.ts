@@ -1742,6 +1742,56 @@ describe("session.message-v2.latest", () => {
       state: remote,
       summary: "local summary",
     })
+
+    const wrappedOldID = MessageID.make("msg_ffffffffffff_old")
+    const wrappedNewID = MessageID.make("msg_000000000000_new")
+    const wrappedOldSummaryID = MessageID.make("msg_ffffffffffff_summary")
+    const wrappedNewSummaryID = MessageID.make("msg_000000000000_summary")
+    const wrappedOld: SessionV1.WithParts = {
+      info: { ...user.info, id: wrappedOldID, time: { created: 1 } },
+      parts: [
+        {
+          ...user.parts[0]!,
+          id: PartID.ascending(),
+          messageID: wrappedOldID,
+          openai: remote,
+        } as SessionV1.CompactionPart,
+      ],
+    }
+    const wrappedNew: SessionV1.WithParts = {
+      info: { ...user.info, id: wrappedNewID, time: { created: 3 } },
+      parts: [
+        {
+          ...user.parts[0]!,
+          id: PartID.ascending(),
+          messageID: wrappedNewID,
+          openai: newerRemote,
+        } as SessionV1.CompactionPart,
+      ],
+    }
+    const wrappedOldSummary: SessionV1.WithParts = {
+      info: {
+        ...summary.info,
+        id: wrappedOldSummaryID,
+        parentID: wrappedOldID,
+        time: { created: 2 },
+      } as SessionV1.Assistant,
+      parts: [{ ...basePart(wrappedOldSummaryID, "wrapped-old"), type: "text", text: "older summary" }],
+    }
+    const wrappedNewSummary: SessionV1.WithParts = {
+      info: {
+        ...summary.info,
+        id: wrappedNewSummaryID,
+        parentID: wrappedNewID,
+        time: { created: 4 },
+      } as SessionV1.Assistant,
+      parts: [{ ...basePart(wrappedNewSummaryID, "wrapped-new"), type: "text", text: "newer summary" }],
+    }
+    expect(MessageV2.openAICompaction([wrappedNew, wrappedNewSummary, wrappedOld, wrappedOldSummary])).toEqual({
+      state: newerRemote,
+      summary: "newer summary",
+    })
+
     const unfinished: SessionV1.WithParts = {
       ...summary,
       info: { ...assistantInfo(SUMMARY_ASSISTANT, COMPACTION_USER), summary: true },

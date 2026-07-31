@@ -144,6 +144,19 @@ describe("OpenAICompaction", () => {
       if (typeof captured?.body !== "string") throw new Error("Expected original request body")
       expect(JSON.parse(captured.body).input).toEqual(input)
       expect(OpenAICompaction.release(token)).toBe("expired")
+
+      const direct = OpenAICompaction.register({ state, summary: "local summary", oauth: false })
+      now += 5 * 60 * 1000 + 1
+      expect(OpenAICompaction.release(direct)).toBe("expired")
+
+      const tombstone = OpenAICompaction.register({ state, summary: "local summary", oauth: false })
+      now += 5 * 60 * 1000 + 1
+      const trigger = OpenAICompaction.register({ state, summary: "local summary", oauth: false })
+      now += 60 * 60 * 1000 + 1
+      const cleanup = OpenAICompaction.register({ state, summary: "local summary", oauth: false })
+      expect(OpenAICompaction.release(tombstone)).toBeUndefined()
+      expect(OpenAICompaction.release(trigger)).toBe("expired")
+      expect(OpenAICompaction.release(cleanup)).toBeUndefined()
     } finally {
       Date.now = originalNow
     }

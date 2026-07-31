@@ -573,20 +573,25 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
 }
 
 export function openAICompaction(msgs: WithParts[]) {
+  const boundaries = new Map<MessageID, WithParts>()
+  for (const msg of msgs) {
+    if (msg.info.role === "user" && msg.parts.some((part) => part.type === "compaction")) {
+      boundaries.set(msg.info.id, msg)
+    }
+  }
   const completed = msgs.flatMap((summary) => {
     if (summary.info.role !== "assistant" || !summary.info.summary || !summary.info.finish || summary.info.error)
       return []
-    const parentID = summary.info.parentID
-    const boundary = msgs.find(
-      (msg) =>
-        msg.info.role === "user" && msg.info.id === parentID && msg.parts.some((part) => part.type === "compaction"),
-    )
+    const boundary = boundaries.get(summary.info.parentID)
     return boundary ? [{ boundary, summary }] : []
   })
   const latest = completed
     .sort(
       (a, b) =>
-        a.boundary.info.id.localeCompare(b.boundary.info.id) || a.summary.info.id.localeCompare(b.summary.info.id),
+        a.boundary.info.time.created - b.boundary.info.time.created ||
+        a.boundary.info.id.localeCompare(b.boundary.info.id) ||
+        a.summary.info.time.created - b.summary.info.time.created ||
+        a.summary.info.id.localeCompare(b.summary.info.id),
     )
     .at(-1)
   if (!latest) return undefined

@@ -25,18 +25,23 @@ type ActiveReplay = Replay & {
 }
 
 const active = new Map<string, ActiveReplay>()
-const expired = new Set<string>()
+const expired = new Map<string, number>()
 const MAX_ACTIVE_AGE_MS = 5 * 60 * 1000
+const MAX_EXPIRED_AGE_MS = 60 * 60 * 1000
 
-function expire(token: string) {
+function expire(token: string, now: number) {
   active.delete(token)
-  expired.add(token)
+  expired.set(token, now)
 }
 
-function sweep() {
-  const cutoff = Date.now() - MAX_ACTIVE_AGE_MS
+function sweep(now = Date.now()) {
+  const activeCutoff = now - MAX_ACTIVE_AGE_MS
   for (const [token, replay] of active) {
-    if (replay.registeredAt < cutoff) expire(token)
+    if (replay.registeredAt < activeCutoff) expire(token, now)
+  }
+  const expiredCutoff = now - MAX_EXPIRED_AGE_MS
+  for (const [token, expiredAt] of expired) {
+    if (expiredAt < expiredCutoff) expired.delete(token)
   }
 }
 
@@ -170,6 +175,7 @@ export function register(replay: Replay) {
 }
 
 export function release(token: string): ReplayFailure | undefined {
+  sweep()
   if (expired.delete(token)) return "expired"
   const item = active.get(token)
   active.delete(token)
@@ -205,11 +211,8 @@ export function wrapFetch(base: FetchLike): FetchLike {
     headers.delete(HTTP_HEADER)
     if (!token) return base(input, { ...init, headers })
 
+    sweep()
     const replay = active.get(token)
-    if (replay && Date.now() - replay.registeredAt > MAX_ACTIVE_AGE_MS) {
-      expire(token)
-      return base(input, { ...init, headers })
-    }
     const url = requestURL(input)
     const method = init?.method ?? (input instanceof Request ? input.method : undefined)
     if (!replay) return base(input, { ...init, headers })

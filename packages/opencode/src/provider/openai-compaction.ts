@@ -4,7 +4,8 @@ import type { Auth } from "@/auth"
 
 export const TOKEN_HEADER = "x-opencode-compaction-token"
 export const HTTP_HEADER = "x-opencode-http"
-export const COMPACTION_PROMPT = "What did we do so far?"
+export { COMPACTION_PROMPT } from "@opencode-ai/core/session/compaction"
+import { COMPACTION_PROMPT } from "@opencode-ai/core/session/compaction"
 export const DEFAULT_BASE_URL = "https://api.openai.com/v1"
 
 type JsonObject = Record<string, unknown>
@@ -16,18 +17,26 @@ export type Replay = {
   oauth: boolean
 }
 
+type ReplayFailure = "invalid_request" | "boundary_not_found" | "expired"
+
 type ActiveReplay = Replay & {
   registeredAt: number
-  failure?: "invalid_request" | "boundary_not_found"
+  failure?: ReplayFailure
 }
 
 const active = new Map<string, ActiveReplay>()
+const expired = new Set<string>()
 const MAX_ACTIVE_AGE_MS = 5 * 60 * 1000
+
+function expire(token: string) {
+  active.delete(token)
+  expired.add(token)
+}
 
 function sweep() {
   const cutoff = Date.now() - MAX_ACTIVE_AGE_MS
   for (const [token, replay] of active) {
-    if (replay.registeredAt < cutoff) active.delete(token)
+    if (replay.registeredAt < cutoff) expire(token)
   }
 }
 
@@ -160,7 +169,8 @@ export function register(replay: Replay) {
   return token
 }
 
-export function release(token: string) {
+export function release(token: string): ReplayFailure | undefined {
+  if (expired.delete(token)) return "expired"
   const item = active.get(token)
   active.delete(token)
   return item?.failure
@@ -197,7 +207,7 @@ export function wrapFetch(base: FetchLike): FetchLike {
 
     const replay = active.get(token)
     if (replay && Date.now() - replay.registeredAt > MAX_ACTIVE_AGE_MS) {
-      active.delete(token)
+      expire(token)
       return base(input, { ...init, headers })
     }
     const url = requestURL(input)

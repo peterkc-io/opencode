@@ -573,26 +573,35 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
 }
 
 export function openAICompaction(msgs: WithParts[]) {
-  const boundary = msgs.findLast(
-    (msg) => msg.info.role === "user" && msg.parts.some((part) => part.type === "compaction"),
-  )
-  if (!boundary || boundary.info.role !== "user") return undefined
-  const part = boundary.parts.findLast((item): item is CompactionPart => item.type === "compaction")
-  if (part?.openai?.status !== "success") return undefined
-  const summary = msgs.findLast(
-    (msg) =>
-      msg.info.role === "assistant" &&
-      msg.info.parentID === boundary.info.id &&
-      msg.info.summary === true &&
-      Boolean(msg.info.finish) &&
-      !msg.info.error,
-  )
-  if (!summary || summary.info.role !== "assistant") return undefined
+  const completed = msgs.flatMap((summary) => {
+    if (summary.info.role !== "assistant" || !summary.info.summary || !summary.info.finish || summary.info.error)
+      return []
+    const parentID = summary.info.parentID
+    const boundary = msgs.find(
+      (msg) =>
+        msg.info.role === "user" && msg.info.id === parentID && msg.parts.some((part) => part.type === "compaction"),
+    )
+    return boundary ? [{ boundary, summary }] : []
+  })
+  const latest = completed
+    .sort(
+      (a, b) =>
+        a.boundary.info.id.localeCompare(b.boundary.info.id) || a.summary.info.id.localeCompare(b.summary.info.id),
+    )
+    .at(-1)
+  if (!latest) return undefined
+
+  const selected = latest.boundary.parts
+    .flatMap((part) => (part.type === "compaction" && part.openai ? [{ id: part.id, state: part.openai }] : []))
+    .sort((a, b) => a.state.time - b.state.time || a.id.localeCompare(b.id))
+    .at(-1)
+  if (selected?.state.status !== "success") return undefined
+
   const text = OpenAICompaction.summaryText(
-    summary.parts.filter((item): item is SessionV1.TextPart => item.type === "text").map((item) => item.text),
+    latest.summary.parts.filter((item): item is SessionV1.TextPart => item.type === "text").map((item) => item.text),
   )
   if (!text) return undefined
-  return { state: part.openai, summary: text }
+  return { state: selected.state, summary: text }
 }
 
 export const filterCompactedEffect = Effect.fnUntraced(function* (sessionID: SessionID) {

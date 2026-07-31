@@ -128,7 +128,7 @@ describe("OpenAICompaction", () => {
       const abandoned = OpenAICompaction.register({ state, summary: "local summary", oauth: false })
       now += 5 * 60 * 1000 + 1
       const token = OpenAICompaction.register({ state, summary: "local summary", oauth: false })
-      expect(OpenAICompaction.release(abandoned)).toBeUndefined()
+      expect(OpenAICompaction.release(abandoned)).toBe("expired")
       const wrapped = OpenAICompaction.wrapFetch(async (_request, init) => {
         captured = init
         return new Response("{}")
@@ -143,7 +143,7 @@ describe("OpenAICompaction", () => {
 
       if (typeof captured?.body !== "string") throw new Error("Expected original request body")
       expect(JSON.parse(captured.body).input).toEqual(input)
-      expect(OpenAICompaction.release(token)).toBeUndefined()
+      expect(OpenAICompaction.release(token)).toBe("expired")
     } finally {
       Date.now = originalNow
     }

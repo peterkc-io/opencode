@@ -1695,17 +1695,29 @@ describe("session.message-v2.latest", () => {
     }
 
     expect(MessageV2.openAICompaction([user, summary])).toEqual({ state: remote, summary: "local summary" })
+    const newerRemote = { ...remote, responseID: "resp_2", time: 2 }
     const retried: SessionV1.WithParts = {
       ...user,
       parts: [
-        {
-          ...user.parts[0]!,
-          openai: { status: "fallback", reason: "network_error", time: 1 },
-        } as SessionV1.CompactionPart,
+        { ...user.parts[0]!, id: PartID.ascending(), openai: newerRemote } as SessionV1.CompactionPart,
         ...user.parts,
       ],
     }
-    expect(MessageV2.openAICompaction([retried, summary])).toEqual({ state: remote, summary: "local summary" })
+    const inverse: SessionV1.WithParts = { ...retried, parts: retried.parts.toReversed() }
+    expect(MessageV2.openAICompaction([retried, summary])).toEqual({ state: newerRemote, summary: "local summary" })
+    expect(MessageV2.openAICompaction([inverse, summary])).toEqual({ state: newerRemote, summary: "local summary" })
+    const newestFallback: SessionV1.WithParts = {
+      ...retried,
+      parts: [
+        ...retried.parts,
+        {
+          ...user.parts[0]!,
+          id: PartID.ascending(),
+          openai: { status: "fallback", reason: "network_error", time: 3 },
+        } as SessionV1.CompactionPart,
+      ],
+    }
+    expect(MessageV2.openAICompaction([newestFallback, summary])).toBeUndefined()
     const retryID = MessageID.ascending()
     const retry: SessionV1.WithParts = {
       info: { ...summary.info, id: retryID } as SessionV1.Assistant,
@@ -1714,6 +1726,21 @@ describe("session.message-v2.latest", () => {
     expect(MessageV2.openAICompaction([user, summary, retry])).toEqual({
       state: remote,
       summary: "latest summary",
+    })
+    const incompleteID = MessageID.ascending()
+    const incomplete: SessionV1.WithParts = {
+      info: userInfo(incompleteID),
+      parts: [
+        {
+          ...basePart(incompleteID, "incomplete"),
+          type: "compaction",
+          auto: false,
+        },
+      ],
+    }
+    expect(MessageV2.openAICompaction([user, summary, incomplete])).toEqual({
+      state: remote,
+      summary: "local summary",
     })
     const unfinished: SessionV1.WithParts = {
       ...summary,

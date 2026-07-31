@@ -851,6 +851,7 @@ describe("session.compaction.process", () => {
         id: ModelV2.ID.make("gpt-5.6"),
         providerID: ProviderV2.ID.make("openai"),
         api: { id: "gpt-5.6", url: "https://api.openai.test/v1", npm: "@ai-sdk/openai" },
+        options: { serviceTier: "priority" },
       })
       const info = ProviderTest.info(
         {
@@ -893,6 +894,7 @@ describe("session.compaction.process", () => {
         expect(requests[0]?.headers.get("authorization")).toBe("Bearer sk-test")
         expect(requests[0]?.body.model).toBe("gpt-5.6")
         expect(Array.isArray(requests[0]?.body.input)).toBe(true)
+        expect(requests[0]?.body.service_tier).toBeUndefined()
         expect(yield* readCompactionPart(session.id)).toMatchObject({
           openai: {
             status: "success",

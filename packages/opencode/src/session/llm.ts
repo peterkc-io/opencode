@@ -97,13 +97,12 @@ const live: Layer.Layer<
         mode: input.agent.mode,
       })
 
-      const [language, cfg, item, info, resolvedBaseURL] = yield* Effect.all(
+      const [language, cfg, item, info] = yield* Effect.all(
         [
           provider.getLanguage(input.model),
           config.get(),
           provider.getProvider(input.model.providerID),
           auth.get(input.model.providerID),
-          provider.getBaseURL(input.model),
         ],
         { concurrency: "unbounded" },
       )
@@ -284,6 +283,7 @@ const live: Layer.Layer<
 
       const compactionToken = openAICompaction
         ? yield* Effect.gen(function* () {
+            const resolvedBaseURL = yield* provider.getBaseURL(input.model)
             if (
               !OpenAICompaction.matches({
                 state: openAICompaction.state,

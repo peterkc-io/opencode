@@ -137,7 +137,7 @@ describe("Worktree", () => {
             const svc = yield* Worktree.Service
             const link = path.join(test.directory, "linked-alias")
             yield* Effect.promise(() => fs.symlink(info.directory, link))
-            const directory = yield* Effect.promise(() => fs.realpath(info.directory))
+            const directory = FSUtil.canonicalPath(yield* Effect.promise(() => fs.realpath(info.directory)))
 
             expect((yield* svc.resolveLinked(info.directory)).directory).toBe(directory)
             expect((yield* svc.resolveLinked(link)).directory).toBe(directory)

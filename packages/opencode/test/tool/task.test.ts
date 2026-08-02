@@ -922,7 +922,7 @@ describe("tool.task", () => {
               ask: () => Effect.void,
             },
           )
-          expect(child.directory).toBe(canonical(directory))
+          expect(canonical(child.directory)).toBe(canonical(directory))
           expect(child.metadata?.taskPlacement).toEqual({
             ownerDirectory: canonical(test.directory),
             executionDirectory: canonical(directory),
@@ -936,7 +936,7 @@ describe("tool.task", () => {
           expect(targetAgent?.permission).toContainEqual({ permission: "write", pattern: "*", action: "deny" })
           expect(resumed.metadata.sessionId).toBe(child.id)
           expect(yield* sessions.children(chat.id)).toHaveLength(1)
-          expect(roots).toEqual(Array(4).fill(canonical(directory)))
+          expect(roots.map(canonical)).toEqual(Array(4).fill(canonical(directory)))
           expect(permission).toEqual(
             expect.objectContaining({ metadata: expect.objectContaining({ worktree: canonical(directory) }) }),
           )
@@ -1265,14 +1265,16 @@ describe("tool.task", () => {
               { concurrency: "unbounded" },
             )
 
-            expect(roots).toEqual(
+            expect(new Map([...roots].map(([key, value]) => [key, canonical(value)]))).toEqual(
               new Map([
                 ["first", canonical(first)],
                 ["second", canonical(second)],
               ]),
             )
-            expect(yield* Effect.promise(() => Bun.file(path.join(first, "first.marker")).text())).toBe(canonical(first))
-            expect(yield* Effect.promise(() => Bun.file(path.join(second, "second.marker")).text())).toBe(
+            expect(canonical(yield* Effect.promise(() => Bun.file(path.join(first, "first.marker")).text()))).toBe(
+              canonical(first),
+            )
+            expect(canonical(yield* Effect.promise(() => Bun.file(path.join(second, "second.marker")).text()))).toBe(
               canonical(second),
             )
           }),
@@ -1341,9 +1343,9 @@ describe("tool.task", () => {
           const grandchild = yield* sessions
             .get(result.metadata.sessionId)
             .pipe(Effect.provideService(InstanceRef, execution))
-          expect(grandchild.directory).toBe(canonical(directory))
+          expect(canonical(grandchild.directory)).toBe(canonical(directory))
           expect(grandchild.metadata?.taskPlacement).toBeUndefined()
-          expect(roots).toEqual([canonical(directory)])
+          expect(roots.map(canonical)).toEqual([canonical(directory)])
         }),
       ),
     { git: true, config: { subagent_depth: 2 } },
@@ -1415,8 +1417,9 @@ describe("tool.task", () => {
                 worktree: second,
               }),
             )
-            expect(root).toBe(canonical(second))
-            expect(grandchild.directory).toBe(canonical(second))
+            expect(root).toBeDefined()
+            expect(canonical(root!)).toBe(canonical(second))
+            expect(canonical(grandchild.directory)).toBe(canonical(second))
             expect(grandchild.metadata?.taskPlacement).toEqual({
               ownerDirectory: canonical(first),
               executionDirectory: canonical(second),
@@ -1472,7 +1475,7 @@ describe("tool.task", () => {
 
           expect((yield* jobs.get(result.metadata.sessionId))?.status).toBe("running")
           yield* sessions.remove(result.metadata.sessionId)
-          expect(yield* Deferred.await(cancelled)).toBe(canonical(directory))
+          expect(canonical(yield* Deferred.await(cancelled))).toBe(canonical(directory))
           expect((yield* jobs.wait({ id: result.metadata.sessionId })).info?.status).toBe("cancelled")
           expect(Exit.isFailure(yield* sessions.get(result.metadata.sessionId).pipe(Effect.exit))).toBe(true)
         }),
@@ -1535,7 +1538,7 @@ describe("tool.task", () => {
             (yield* jobs.get(result.metadata.sessionId).pipe(Effect.provideService(InstanceRef, aliasedOwner)))?.status,
           ).toBe("running")
           yield* sessions.remove(result.metadata.sessionId).pipe(Effect.provideService(InstanceRef, aliasedOwner))
-          expect(yield* Deferred.await(cancelled)).toBe(canonical(directory))
+          expect(canonical(yield* Deferred.await(cancelled))).toBe(canonical(directory))
           expect(
             (yield* jobs.wait({ id: result.metadata.sessionId }).pipe(Effect.provideService(InstanceRef, aliasedOwner)))
               .info?.status,

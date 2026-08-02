@@ -625,10 +625,7 @@ const layer: Layer.Layer<
 
     const canonicalDirectory = Effect.fnUntraced(function* (sessionID: SessionID, input: string, kind: string) {
       return yield* fs.realPath(path.resolve(input)).pipe(
-        Effect.map((value) => {
-          const normalized = path.normalize(value)
-          return process.platform === "win32" ? normalized.toLowerCase() : normalized
-        }),
+        Effect.map(FSUtil.canonicalPath),
         Effect.mapError(
           () =>
             new DirectoryMismatchError({

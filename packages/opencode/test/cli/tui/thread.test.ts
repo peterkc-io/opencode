@@ -14,6 +14,8 @@ describe("tui thread", () => {
     expect(source).toContain('await import("../tui/layer")')
     expect(source).toMatch(/await import\(["']@\/plugin\/tui\/runtime["']\)/)
     expect(source).not.toContain('import("./app")')
+    expect(source).toContain("process.exit(process.exitCode ?? 0)")
+    expect(source).not.toContain("process.exit(0)")
   })
 
   test("forwards the CLI environment to the TUI worker", async () => {

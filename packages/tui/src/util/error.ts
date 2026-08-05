@@ -144,6 +144,18 @@ export function errorMessage(error: unknown): string {
   return "unknown error"
 }
 
+const fatalRendererAllocationMessages = new Set([
+  "Failed to create TextBuffer",
+  "Failed to create TextBufferView",
+  "Failed to create EditorView",
+  "Failed to create EditBuffer",
+  "Failed to create SyntaxStyle",
+])
+
+export function isFatalRendererAllocationError(error: unknown): boolean {
+  return fatalRendererAllocationMessages.has(errorMessage(error))
+}
+
 export function errorData(error: unknown) {
   if (error instanceof Error) {
     return {

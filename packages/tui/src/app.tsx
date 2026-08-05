@@ -92,7 +92,7 @@ import { COMMAND_PALETTE_COMMAND, Keymap, type KeymapCommand } from "./context/k
 import { DialogVariant } from "./component/dialog-variant"
 import { win32DisableProcessedInput, win32FlushInputBuffer } from "./terminal-win32"
 import { destroyRenderer } from "./util/renderer"
-import { cliErrorMessage, errorFormat } from "./util/error"
+import { cliErrorMessage, errorFormat, isFatalRendererAllocationError } from "./util/error"
 import { AttentionProvider } from "./context/attention"
 import { StorageProvider } from "./context/storage"
 
@@ -215,9 +215,7 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
     Effect.catch(() => Effect.tryPromise(() => api.location.get())),
   )
   const directory = location.directory
-  const pluginDirectories = yield* Effect.promise(() =>
-    tuiPluginDirectories(process.cwd(), global.config),
-  )
+  const pluginDirectories = yield* Effect.promise(() => tuiPluginDirectories(process.cwd(), global.config))
   const handoff = input.terminalHandoff ? yield* Effect.promise(input.terminalHandoff) : undefined
   const managed = input.server.service
   const service = managed
@@ -276,12 +274,17 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
         }),
       )
       const shutdown = yield* Deferred.make<unknown>()
-      const onSighup = () => destroyRenderer(renderer)
+      const requestExit = (reason?: unknown) => {
+        if (reason !== undefined && exit.reason === undefined) exit.reason = reason
+        if (renderer.isDestroyed) return
+        destroyRenderer(renderer)
+      }
+      renderer.once("destroy", () => Deferred.doneUnsafe(shutdown, Effect.void))
+      const onSighup = () => requestExit()
       yield* Effect.acquireRelease(
         Effect.sync(() => process.on("SIGHUP", onSighup)),
         () => Effect.sync(() => process.off("SIGHUP", onSighup)),
       )
-      renderer.once("destroy", () => Deferred.doneUnsafe(shutdown, Effect.void))
       yield* Effect.tryPromise(async () => {
         // Prewarm palette before ThemeProvider mounts so `system` theme avoids a first-paint fallback flash.
         void renderer.getPalette({ size: 16 }).catch(() => undefined)
@@ -291,17 +294,18 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
         await render(() => {
           return (
             <LogProvider log={log}>
-              <ExitProvider
-                exit={(reason) => {
-                  if (renderer.isDestroyed) return
-                  exit.reason = reason
-                  destroyRenderer(renderer)
-                }}
-              >
+              <ExitProvider exit={requestExit}>
                 <EpilogueProvider set={(value) => (exit.epilogue = value)}>
                   <TuiAppProvider value={input.app}>
                     <ErrorBoundary
-                      fallback={(error, reset) => <ErrorComponent error={error} reset={reset} mode={mode} />}
+                      fallback={(error, reset) => {
+                        if (isFatalRendererAllocationError(error)) {
+                          if (exit.reason === undefined) exit.reason = error
+                          queueMicrotask(requestExit)
+                          return null
+                        }
+                        return <ErrorComponent error={error} reset={reset} mode={mode} />
+                      }}
                     >
                       <TuiPathsProvider
                         value={{
@@ -442,8 +446,11 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
   )
   yield* Effect.sync(() => {
     win32FlushInputBuffer()
-    if (result.reason !== undefined)
-      process.stderr.write((cliErrorMessage(result.reason) ?? errorFormat(result.reason)) + "\n")
+    if (result.reason !== undefined) {
+      const message = cliErrorMessage(result.reason) ?? errorFormat(result.reason)
+      if (!process.exitCode) process.exitCode = 1
+      process.stderr.write(message + "\n")
+    }
     if (result.epilogue) process.stdout.write(result.epilogue + "\n")
   })
 })

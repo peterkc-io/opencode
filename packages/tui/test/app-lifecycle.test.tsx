@@ -21,6 +21,8 @@ test("SIGHUP clears title and disposes scoped resources once", async () => {
     setTitle(title)
   }
   const listeners = new Set(process.listeners("SIGHUP"))
+  const previousExitCode = process.exitCode
+  process.exitCode = undefined
   const events = createEventStream()
   const calls = createFetch(undefined, events)
   const server = Bun.serve({ port: 0, fetch: (request) => calls.fetch(request) })
@@ -43,7 +45,9 @@ test("SIGHUP clears title and disposes scoped resources once", async () => {
     expect(setup.renderer.isDestroyed).toBe(true)
     expect(titles.at(-1)).toBe("")
     expect(process.listeners("SIGHUP").every((listener) => listeners.has(listener))).toBe(true)
+    expect(process.exitCode).toBeUndefined()
   } finally {
+    process.exitCode = previousExitCode
     if (!setup.renderer.isDestroyed) setup.renderer.destroy()
     await server.stop()
     mock.restore()
@@ -302,3 +306,158 @@ test("session startup prompt is submitted exactly once", async () => {
     mock.restore()
   }
 })
+
+test("nonfatal renderer errors do not force exit", async () => {
+  const setup = await createTestRenderer({ width: 80, height: 24, useThread: false })
+  const core = await import("@opentui/core")
+  mock.module("@opentui/core", () => ({ ...core, createCliRenderer: async () => setup.renderer }))
+  const events = createEventStream()
+  const calls = createFetch(undefined, events)
+  const server = Bun.serve({ port: 0, fetch: (request) => calls.fetch(request) })
+  const previousRoute = process.env.OPENCODE_ROUTE
+  const previousExitCode = process.exitCode
+  const originalParse = JSON.parse
+  const marker = "__ordinary_render_failure__"
+  const failed = Promise.withResolvers<void>()
+  process.env.OPENCODE_ROUTE = marker
+  process.exitCode = undefined
+  JSON.parse = ((text: string, reviver?: (this: unknown, key: string, value: unknown) => unknown) => {
+    if (text === marker) {
+      failed.resolve()
+      throw new Error("ordinary render failure")
+    }
+    return originalParse(text, reviver)
+  }) as typeof JSON.parse
+
+  try {
+    const { run } = await import("../src/app")
+    const task = Effect.runPromise(
+      run({
+        app: { name: "test", version: "test", channel: "test" },
+        server: { endpoint: { url: server.url.toString() } },
+        config: { get: async () => ({}), update: async () => ({}) },
+        packages: { resolve: async () => undefined },
+        args: {},
+        log: () => {},
+      }).pipe(Effect.provide(AppNodeBuilder.build(Global.node)), Effect.provide(FileSystem.layerNoop({}))),
+    )
+
+    await failed.promise
+    expect(setup.renderer.isDestroyed).toBe(false)
+    expect(process.exitCode).toBeUndefined()
+    process.emit("SIGHUP")
+    await task
+    expect(process.exitCode).toBeUndefined()
+  } finally {
+    JSON.parse = originalParse
+    process.exitCode = previousExitCode
+    if (previousRoute === undefined) delete process.env.OPENCODE_ROUTE
+    else process.env.OPENCODE_ROUTE = previousRoute
+    if (!setup.renderer.isDestroyed) setup.renderer.destroy()
+    await server.stop()
+    mock.restore()
+  }
+})
+
+test("fatal renderer allocation restores the terminal and exits nonzero", async () => {
+  const result = await allocationFailure({})
+
+  expect(result.destroyCalls).toBe(1)
+  expect(result.titles.at(-1)).toBe("")
+  expect(result.stderr.split("Failed to create TextBuffer")).toHaveLength(2)
+  expect(result.exitCode).toBe(1)
+  expect(result.listenersRestored).toBe(true)
+})
+
+test("fatal renderer allocation replaces an explicit success status", async () => {
+  const result = await allocationFailure({ exitCode: 0 })
+
+  expect(result.exitCode).toBe(1)
+})
+
+test("fatal renderer allocation preserves an existing failure status", async () => {
+  const result = await allocationFailure({ exitCode: 7 })
+
+  expect(result.exitCode).toBe(7)
+})
+
+test("fatal renderer allocation preserves the reason when destruction competes", async () => {
+  const result = await allocationFailure({ competingDestroy: true })
+
+  expect(result.destroyCalls).toBe(1)
+  expect(result.stderr.split("Failed to create TextBuffer")).toHaveLength(2)
+  expect(result.exitCode).toBe(1)
+})
+
+async function allocationFailure(input: { competingDestroy?: boolean; exitCode?: number }) {
+  const setup = await createTestRenderer({ width: 80, height: 24, useThread: false })
+  const core = await import("@opentui/core")
+  mock.module("@opentui/core", () => ({ ...core, createCliRenderer: async () => setup.renderer }))
+  const events = createEventStream()
+  const calls = createFetch(undefined, events)
+  const server = Bun.serve({ port: 0, fetch: (request) => calls.fetch(request) })
+  const listeners = new Set(process.listeners("SIGHUP"))
+  const previousRoute = process.env.OPENCODE_ROUTE
+  const previousExitCode = process.exitCode
+  const originalParse = JSON.parse
+  const originalWrite = process.stderr.write.bind(process.stderr)
+  const originalDestroy = setup.renderer.destroy.bind(setup.renderer)
+  const originalTitle = setup.renderer.setTerminalTitle.bind(setup.renderer)
+  const marker = "__text_buffer_failure__"
+  const titles: string[] = []
+  let stderr = ""
+  let destroyCalls = 0
+
+  setup.renderer.destroy = () => {
+    destroyCalls++
+    originalDestroy()
+  }
+  setup.renderer.setTerminalTitle = (title) => {
+    titles.push(title)
+    originalTitle(title)
+  }
+  process.env.OPENCODE_ROUTE = marker
+  process.exitCode = input.exitCode
+  JSON.parse = ((text: string, reviver?: (this: unknown, key: string, value: unknown) => unknown) => {
+    if (text === marker) {
+      if (input.competingDestroy) queueMicrotask(() => process.emit("SIGHUP"))
+      throw new Error("Failed to create TextBuffer")
+    }
+    return originalParse(text, reviver)
+  }) as typeof JSON.parse
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderr += String(chunk)
+    return true
+  }) as typeof process.stderr.write
+
+  try {
+    const { run } = await import("../src/app")
+    await Effect.runPromise(
+      run({
+        app: { name: "test", version: "test", channel: "test" },
+        server: { endpoint: { url: server.url.toString() } },
+        config: { get: async () => ({}), update: async () => ({}) },
+        packages: { resolve: async () => undefined },
+        args: {},
+        log: () => {},
+      }).pipe(Effect.provide(AppNodeBuilder.build(Global.node)), Effect.provide(FileSystem.layerNoop({}))),
+    )
+
+    return {
+      destroyCalls,
+      titles,
+      stderr,
+      exitCode: Number(process.exitCode),
+      listenersRestored: process.listeners("SIGHUP").every((listener) => listeners.has(listener)),
+    }
+  } finally {
+    JSON.parse = originalParse
+    process.stderr.write = originalWrite
+    process.exitCode = previousExitCode
+    if (previousRoute === undefined) delete process.env.OPENCODE_ROUTE
+    else process.env.OPENCODE_ROUTE = previousRoute
+    if (!setup.renderer.isDestroyed) setup.renderer.destroy()
+    await server.stop()
+    mock.restore()
+  }
+}

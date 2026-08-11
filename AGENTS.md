@@ -6,7 +6,9 @@
 
 ## Branch Names
 
-Use a short branch name of at most three words, separated by hyphens. Do not use slashes or type prefixes such as `feat/` or `fix/`.
+Use a short topic-branch name of at most three words, separated by hyphens. Do
+not use slashes or type prefixes such as `feat/` or `fix/`. The named long-lived
+`integration/opencode-dev` branch is the fork integration exception.
 
 Examples: `session-recovery`, `fix-scroll-state`, `regenerate-sdk`.
 

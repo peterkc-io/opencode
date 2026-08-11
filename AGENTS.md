@@ -159,3 +159,28 @@ const table = sqliteTable("session", {
 - Keep delivery vocabulary explicit. Prompts steer by default and promote at the next safe provider-turn boundary while the current drain requires continuation. An explicit `queue` input remains pending until the Session would otherwise become idle; promote one queued input at that boundary, then reevaluate continuation before promoting another. Promoting any new user input resets the selected agent's provider-turn allowance; a batch of steers resets it once.
 - Keep EventV2 replay owner claims separate from clustered Session execution ownership.
 - Keep the System Context algebra, registry, and built-ins in `src/system-context`; keep Context Source producers with their observed domains, and keep Session History selection plus Context Epoch persistence Session-owned.
+
+## Fork Integration Workflow
+
+- Treat `dev` as a fast-forward-only mirror of upstream `dev`. Do not put feature
+  commits on it.
+- Preserve dirty worktrees. Never switch, reset, clean, stash, or build from a
+  mixed donor when a clean linked worktree can be created from the intended base.
+- Use `integration/opencode-dev` for long-lived local integration history.
+- Reconstruct each concern on its own topic branch from the current integration
+  base and target its pull request at `integration/opencode-dev`.
+- Squash-merge topic pull requests and keep their branches frozen through soak.
+  Put each correction on a new branch and pull request.
+- Synchronize upstream changes through a dedicated pull request and merge commit
+  so upstream commit identity remains visible.
+- Never retarget an integration pull request to upstream. After soak, create a
+  fresh branch from current upstream `dev` when an upstream contribution is
+  approved.
+- Build and package only a reviewed, committed, clean integration revision.
+  Record source commit, tag, version, architecture, code-signing result, and
+  installed SHA-256.
+- Install a development candidate at `~/.local/bin/opencode-dev` through a
+  same-directory candidate and atomic rename. Preserve and verify
+  `opencode-dev.previous` before replacement.
+- Do not force-push, amend reviewed commits, delete frozen soak branches, or
+  bypass tests, hooks, signing, clean-tree, review, or provenance gates.

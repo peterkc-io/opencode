@@ -4,7 +4,7 @@ import fs from "node:fs/promises"
 import Http from "node:http"
 import path from "node:path"
 import { NodeHttpServer } from "@effect/platform-node"
-import { Effect, Exit, Fiber, Layer, Schema } from "effect"
+import { Cause, Effect, Exit, Fiber, Layer, Schema } from "effect"
 import { HttpServer, HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
 import { eq } from "drizzle-orm"
 import { GlobalBus, type GlobalEvent } from "@/bus/global"
@@ -969,6 +969,36 @@ describe("workspace CRUD", () => {
         ).toBeNull()
         expect(yield* sessionSequenceOwner(session.id)).toBe(projectID)
         expect(yield* sessionSequenceOwner(session.id)).not.toBe(workspaceProjectID)
+      }),
+    { git: true },
+  )
+
+  it.instance(
+    "sessionWarp rejects a session owned by another project",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const instance = yield* requireInstance
+        const workspace = yield* Workspace.Service
+        const previousType = unique("warp-foreign-project")
+        const previous = workspaceInfo(instance.project.id, previousType)
+        yield* insertWorkspace(previous)
+        registerAdapter(
+          instance.project.id,
+          previousType,
+          localAdapter(path.join(test.directory, previousType)).adapter,
+        )
+        const foreign = yield* provideTmpdirInstance(() => SessionNs.Service.use((sessions) => sessions.create({})), {
+          git: true,
+        })
+        yield* attachSessionToWorkspace(foreign.id, previous.id)
+
+        const exit = yield* workspace.sessionWarp({ workspaceID: null, sessionID: foreign.id }).pipe(Effect.exit)
+
+        expect(Exit.isFailure(exit)).toBe(true)
+        if (Exit.isFailure(exit)) {
+          expect(Cause.squash(exit.cause)).toBeInstanceOf(SessionNs.DirectoryMismatchError)
+        }
       }),
     { git: true },
   )

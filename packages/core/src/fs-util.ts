@@ -1,5 +1,5 @@
 import { NodeFileSystem } from "@effect/platform-node"
-import { dirname, isAbsolute, join, relative, resolve as pathResolve, sep } from "path"
+import { dirname, isAbsolute, join, normalize, relative, resolve as pathResolve, sep } from "path"
 import { realpathSync } from "fs"
 import * as NFS from "fs/promises"
 import { lookup } from "mime-types"
@@ -233,6 +233,11 @@ export namespace FSUtil {
     } catch {
       return resolved
     }
+  }
+
+  export function canonicalPath(p: string): string {
+    const result = normalize(normalizePath(p))
+    return process.platform === "win32" ? result.toLowerCase() : result
   }
 
   export function normalizePathPattern(p: string): string {

@@ -123,6 +123,7 @@ type SessionWarpError =
   | WorkspaceNotFoundError
   | SessionEventsNotFoundError
   | SessionWarpHttpError
+  | Session.DirectoryMismatchError
   | Vcs.PatchApplyError
   | HttpClientError.HttpClientError
 type WaitForSyncError = SyncTimeoutError | SyncAbortedError
@@ -581,7 +582,7 @@ const layer = Layer.effect(
                 ),
               )
             } else {
-              yield* prompt.cancel(input.sessionID)
+              yield* prompt.cancelFromWorkspace({ sessionID: input.sessionID, projectID: previous.projectID })
             }
 
             // "claim" this session so any future events coming from

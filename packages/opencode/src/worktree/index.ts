@@ -371,8 +371,7 @@ const layer: Layer.Layer<
     const canonical = Effect.fnUntraced(function* (input: string) {
       const abs = pathSvc.resolve(input)
       const real = yield* fs.realPath(abs).pipe(Effect.catch(() => Effect.succeed(abs)))
-      const normalized = pathSvc.normalize(real)
-      return process.platform === "win32" ? normalized.toLowerCase() : normalized
+      return FSUtil.canonicalPath(real)
     })
 
     const canonicalStrict = Effect.fnUntraced(function* (input: string) {
@@ -387,8 +386,7 @@ const layer: Layer.Layer<
       if (!(yield* fs.isDir(real))) {
         return yield* new InvalidTargetError({ message: `Worktree target is not a directory: ${input}` })
       }
-      const normalized = pathSvc.normalize(real)
-      return process.platform === "win32" ? normalized.toLowerCase() : normalized
+      return FSUtil.canonicalPath(real)
     })
 
     function parseWorktreeList(text: string) {
@@ -483,8 +481,7 @@ const layer: Layer.Layer<
 
       const raw = new Set<string>()
       for (const entry of entries) {
-        const key = pathSvc.normalize(pathSvc.resolve(entry.worktree))
-        const normalized = process.platform === "win32" ? key.toLowerCase() : key
+        const normalized = FSUtil.canonicalPath(pathSvc.resolve(entry.worktree))
         if (raw.has(normalized)) {
           return yield* new InvalidTargetError({ message: `Git reported a duplicate worktree path: ${entry.worktree}` })
         }
@@ -498,8 +495,7 @@ const layer: Layer.Layer<
 
       const matches = [] as PorcelainEntry[]
       for (const entry of entries) {
-        const lexical = pathSvc.normalize(pathSvc.resolve(entry.worktree))
-        const normalized = process.platform === "win32" ? lexical.toLowerCase() : lexical
+        const normalized = FSUtil.canonicalPath(pathSvc.resolve(entry.worktree))
         if (entry.prunable !== undefined) {
           if (normalized === directory) {
             return yield* new InvalidTargetError({ message: `Worktree target is prunable: ${directory}` })

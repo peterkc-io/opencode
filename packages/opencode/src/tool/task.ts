@@ -143,8 +143,7 @@ export const TaskTool = Tool.define(
 
     const canonical = Effect.fnUntraced(function* (input: string) {
       const real = yield* fs.realPath(path.resolve(input))
-      const normalized = path.normalize(real)
-      return process.platform === "win32" ? normalized.toLowerCase() : normalized
+      return FSUtil.canonicalPath(real)
     })
 
     function eligible(input: Agent.Info | undefined) {

@@ -103,6 +103,10 @@ function isOrphanedInterruptedTool(part: SessionV1.ToolPart) {
 
 export interface Interface {
   readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
+  readonly cancelFromWorkspace: (input: {
+    sessionID: SessionID
+    projectID: Session.Info["projectID"]
+  }) => Effect.Effect<void, Session.DirectoryMismatchError>
   readonly prompt: (input: PromptInput) => Effect.Effect<SessionV1.WithParts, Image.Error>
   readonly loop: (input: LoopInput) => Effect.Effect<SessionV1.WithParts>
   readonly shell: (input: ShellInput) => Effect.Effect<SessionV1.WithParts, Session.BusyError>
@@ -152,18 +156,42 @@ const layer = Layer.effect(
       } satisfies TaskPromptOps
     })
 
+    const cancelSession = Effect.fnUntraced(function* (session: Session.Info) {
+      const placement = yield* Session.taskPlacement(session).pipe(Effect.orDie)
+      if (placement) yield* background.cancelSessionAt({ directory: placement.ownerDirectory, sessionID: session.id })
+      yield* Effect.logInfo("cancel", { "session.id": session.id })
+      yield* state.cancel(session.id)
+    })
+
     const cancel = Effect.fn("SessionPrompt.cancel")(function* (sessionID: SessionID) {
-      const found = yield* sessions.assertInstanceDirectory(sessionID).pipe(
+      const session = yield* sessions.assertInstanceDirectory(sessionID).pipe(
         Effect.map(Option.some),
         Effect.catchIf(StorageNotFoundError.isInstance, () => Effect.succeed(Option.none())),
         Effect.orDie,
       )
-      if (Option.isNone(found)) return
-      const session = found.value
-      const placement = yield* Session.taskPlacement(session).pipe(Effect.orDie)
-      if (placement) yield* background.cancelSessionAt({ directory: placement.ownerDirectory, sessionID })
-      yield* Effect.logInfo("cancel", { "session.id": sessionID })
-      yield* state.cancel(sessionID)
+      if (Option.isSome(session)) yield* cancelSession(session.value)
+    })
+
+    const cancelFromWorkspace = Effect.fn("SessionPrompt.cancelFromWorkspace")(function* (input: {
+      sessionID: SessionID
+      projectID: Session.Info["projectID"]
+    }) {
+      const session = yield* sessions.get(input.sessionID).pipe(
+        Effect.map(Option.some),
+        Effect.catchIf(StorageNotFoundError.isInstance, () => Effect.succeed(Option.none())),
+        Effect.orDie,
+      )
+      if (Option.isNone(session)) return
+      if (session.value.projectID !== input.projectID) {
+        const ctx = yield* InstanceState.context
+        return yield* new Session.DirectoryMismatchError({
+          sessionID: session.value.id,
+          sessionDirectory: session.value.directory,
+          instanceDirectory: ctx.directory,
+          message: `Session project does not match the workspace project: ${session.value.id}`,
+        })
+      }
+      yield* cancelSession(session.value)
     })
 
     const resolvePromptParts = Effect.fn("SessionPrompt.resolvePromptParts")(function* (template: string) {
@@ -1498,6 +1526,7 @@ const layer = Layer.effect(
 
     return Service.of({
       cancel,
+      cancelFromWorkspace,
       prompt,
       loop,
       shell,

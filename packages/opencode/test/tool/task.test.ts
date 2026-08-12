@@ -95,6 +95,8 @@ const withLinkedWorktree = <A, E, R>(use: (directory: string) => Effect.Effect<A
     (directory) => Worktree.Service.use((svc) => svc.remove({ directory }).pipe(Effect.ignore)),
   )
 
+const canonical = (directory: string) => FSUtil.canonicalPath(directory)
+
 function defer<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void
   const promise = new Promise<T>((done) => {
@@ -920,10 +922,10 @@ describe("tool.task", () => {
               ask: () => Effect.void,
             },
           )
-          expect(child.directory).toBe(directory)
+          expect(canonical(child.directory)).toBe(canonical(directory))
           expect(child.metadata?.taskPlacement).toEqual({
-            ownerDirectory: test.directory,
-            executionDirectory: directory,
+            ownerDirectory: canonical(test.directory),
+            executionDirectory: canonical(directory),
           })
           expect(child.permission).toEqual([{ permission: "read", pattern: "*", action: "deny" }])
           expect(promptInput?.model?.providerID).toBe(ProviderV2.ID.make("target"))
@@ -934,9 +936,9 @@ describe("tool.task", () => {
           expect(targetAgent?.permission).toContainEqual({ permission: "write", pattern: "*", action: "deny" })
           expect(resumed.metadata.sessionId).toBe(child.id)
           expect(yield* sessions.children(chat.id)).toHaveLength(1)
-          expect(roots).toEqual([directory, directory, directory, directory])
+          expect(roots.map(canonical)).toEqual(Array(4).fill(canonical(directory)))
           expect(permission).toEqual(
-            expect.objectContaining({ metadata: expect.objectContaining({ worktree: directory }) }),
+            expect.objectContaining({ metadata: expect.objectContaining({ worktree: canonical(directory) }) }),
           )
           expect(yield* Effect.promise(() => Bun.file(path.join(directory, "task-marker")).text())).toBe("target")
           expect(yield* fs.exists(path.join(test.directory, "task-marker"))).toBe(false)
@@ -947,7 +949,7 @@ describe("tool.task", () => {
               .pipe(Effect.provideService(InstanceRef, { ...owner, directory, worktree: directory })),
           ).toBeUndefined()
           expect((yield* sessions.list({ directory: test.directory })).map((item) => item.id)).not.toContain(child.id)
-          expect((yield* sessions.list({ directory })).map((item) => item.id)).toContain(child.id)
+          expect((yield* sessions.list({ directory: child.directory })).map((item) => item.id)).toContain(child.id)
           expect((yield* sessions.list({ scope: "project" })).map((item) => item.id)).toContain(child.id)
         }),
       ),
@@ -1104,12 +1106,12 @@ describe("tool.task", () => {
             .get(result.metadata.sessionId)
             .pipe(Effect.provideService(InstanceRef, execution))
           expect(child.metadata?.taskPlacement).toEqual({
-            ownerDirectory: directory,
-            executionDirectory: directory,
+            ownerDirectory: canonical(directory),
+            executionDirectory: canonical(directory),
           })
           expect(result.metadata.taskPlacement).toEqual(child.metadata?.taskPlacement)
           expect(permission).toEqual(
-            expect.objectContaining({ metadata: expect.objectContaining({ worktree: directory }) }),
+            expect.objectContaining({ metadata: expect.objectContaining({ worktree: canonical(directory) }) }),
           )
         }),
       ),
@@ -1263,14 +1265,18 @@ describe("tool.task", () => {
               { concurrency: "unbounded" },
             )
 
-            expect(roots).toEqual(
+            expect(new Map([...roots].map(([key, value]) => [key, canonical(value)]))).toEqual(
               new Map([
-                ["first", first],
-                ["second", second],
+                ["first", canonical(first)],
+                ["second", canonical(second)],
               ]),
             )
-            expect(yield* Effect.promise(() => Bun.file(path.join(first, "first.marker")).text())).toBe(first)
-            expect(yield* Effect.promise(() => Bun.file(path.join(second, "second.marker")).text())).toBe(second)
+            expect(canonical(yield* Effect.promise(() => Bun.file(path.join(first, "first.marker")).text()))).toBe(
+              canonical(first),
+            )
+            expect(canonical(yield* Effect.promise(() => Bun.file(path.join(second, "second.marker")).text()))).toBe(
+              canonical(second),
+            )
           }),
         ),
       ),
@@ -1337,9 +1343,9 @@ describe("tool.task", () => {
           const grandchild = yield* sessions
             .get(result.metadata.sessionId)
             .pipe(Effect.provideService(InstanceRef, execution))
-          expect(grandchild.directory).toBe(directory)
+          expect(canonical(grandchild.directory)).toBe(canonical(directory))
           expect(grandchild.metadata?.taskPlacement).toBeUndefined()
-          expect(roots).toEqual([directory])
+          expect(roots.map(canonical)).toEqual([canonical(directory)])
         }),
       ),
     { git: true, config: { subagent_depth: 2 } },
@@ -1411,11 +1417,12 @@ describe("tool.task", () => {
                 worktree: second,
               }),
             )
-            expect(root).toBe(second)
-            expect(grandchild.directory).toBe(second)
+            expect(root).toBeDefined()
+            expect(canonical(root!)).toBe(canonical(second))
+            expect(canonical(grandchild.directory)).toBe(canonical(second))
             expect(grandchild.metadata?.taskPlacement).toEqual({
-              ownerDirectory: first,
-              executionDirectory: second,
+              ownerDirectory: canonical(first),
+              executionDirectory: canonical(second),
             })
           }),
         ),
@@ -1468,7 +1475,7 @@ describe("tool.task", () => {
 
           expect((yield* jobs.get(result.metadata.sessionId))?.status).toBe("running")
           yield* sessions.remove(result.metadata.sessionId)
-          expect(yield* Deferred.await(cancelled)).toBe(directory)
+          expect(canonical(yield* Deferred.await(cancelled))).toBe(canonical(directory))
           expect((yield* jobs.wait({ id: result.metadata.sessionId })).info?.status).toBe("cancelled")
           expect(Exit.isFailure(yield* sessions.get(result.metadata.sessionId).pipe(Effect.exit))).toBe(true)
         }),
@@ -1531,7 +1538,7 @@ describe("tool.task", () => {
             (yield* jobs.get(result.metadata.sessionId).pipe(Effect.provideService(InstanceRef, aliasedOwner)))?.status,
           ).toBe("running")
           yield* sessions.remove(result.metadata.sessionId).pipe(Effect.provideService(InstanceRef, aliasedOwner))
-          expect(yield* Deferred.await(cancelled)).toBe(directory)
+          expect(canonical(yield* Deferred.await(cancelled))).toBe(canonical(directory))
           expect(
             (yield* jobs.wait({ id: result.metadata.sessionId }).pipe(Effect.provideService(InstanceRef, aliasedOwner)))
               .info?.status,

@@ -949,7 +949,7 @@ describe("tool.task", () => {
               .pipe(Effect.provideService(InstanceRef, { ...owner, directory, worktree: directory })),
           ).toBeUndefined()
           expect((yield* sessions.list({ directory: test.directory })).map((item) => item.id)).not.toContain(child.id)
-          expect((yield* sessions.list({ directory: canonical(directory) })).map((item) => item.id)).toContain(child.id)
+          expect((yield* sessions.list({ directory: child.directory })).map((item) => item.id)).toContain(child.id)
           expect((yield* sessions.list({ scope: "project" })).map((item) => item.id)).toContain(child.id)
         }),
       ),
